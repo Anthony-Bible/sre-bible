@@ -9,13 +9,13 @@ A person who visits `sre.bible` and interacts with the Resume Agent. Primarily r
 An anonymous, server-side conversation between a Viewer and the Resume Agent. Each Session is identified by a UUID generated at first page load. Sessions are persisted indefinitely in Cloud SQL and are visible to the Owner for analytics. Sessions contain no PII.
 
 ### Source
-A document or URL provided by the Owner that forms the knowledge base of the Resume Agent. Supported types at launch: PDF files and web URLs. Sources are ingested via the `ingest` CLI — not through the web interface.
+A document or URL provided by the Owner that forms the knowledge base of the Resume Agent. Supported types at launch: PDF files and web URLs. Sources are ingested via the `ingest` CLI — not through the web interface. A Source is identified by its citation name: the full URL for web sources, the file basename for PDFs. Re-ingesting a Source replaces its Chunks.
 
 ### Chunk
-A fixed-size segment of a Source produced during ingestion. Each Chunk is embedded independently and stored in Cloud SQL alongside its vector. At query time, the most semantically relevant Chunks are retrieved and passed to the LLM as context.
+A bounded-size segment (~1000 characters, paragraph-aware, with overlap) of a Source produced during ingestion. Each Chunk is embedded independently and stored in Cloud SQL alongside its vector. At query time, the most semantically relevant Chunks are retrieved and passed to the LLM as context. PDF text is extracted via a Gemini generation model (document understanding) before chunking — not by a local PDF library.
 
 ### Embedding
-A high-dimensional vector representation of a Chunk's text, produced by the Gemini `text-embedding-002` model. Embeddings are stored in Cloud SQL via pgvector and used for semantic similarity search during retrieval.
+A 768-dimensional vector representation of a Chunk's text, produced by the Gemini `gemini-embedding-2` model (output dimensionality truncated to 768 and auto-normalized). Embeddings are stored in Cloud SQL via pgvector and used for semantic similarity search during retrieval.
 
 ### Retrieval
 The process of finding the Chunks most semantically relevant to a Viewer's query. Retrieval uses cosine similarity search against stored Embeddings in Cloud SQL.

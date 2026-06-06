@@ -1,18 +1,18 @@
 # Implementation Roadmap — sre.bible Resume Agent
 
-## Phase 1: Data Foundation
+## Phase 1: Data Foundation ✅
 **Goal:** Get data flowing before building any UI.
 
-1. Cloud SQL instance provisioned with pgvector extension enabled
-2. Database schema: `sources`, `chunks`, `sessions`, `messages` tables
-3. `cmd/ingest` CLI binary — accepts a PDF path or URL, chunks it, calls Gemini `text-embedding-002`, writes to Cloud SQL
-4. Verify end-to-end: ingest a resume PDF and query vectors directly in psql
+1. Local Postgres + pgvector via `docker-compose` (`pgvector/pgvector:pg17`); Cloud SQL provisioning moved to Phase 4
+2. Database schema: `sources`, `chunks`, `sessions`, `messages` tables (goose migrations, SQL embedded in binary)
+3. `cmd/ingest` CLI binary — accepts a PDF path or URL, extracts text (Gemini `gemini-2.0-flash` for PDFs, go-readability for URLs), chunks (~1000 chars, paragraph-aware, 200-char overlap), calls Gemini `gemini-embedding-2` (768 dims), writes to local Postgres via `internal/db` + `internal/gemini`
+4. Verify end-to-end: ingest a resume PDF, query vectors directly in psql
 
 ## Phase 2: Core RAG + LLM
 **Goal:** Answer questions from the command line before touching the web layer.
 
-1. `internal/db` — Cloud SQL connection, pgvector similarity search
-2. `internal/embed` — Gemini embedding client
+1. `internal/db` — add pgvector similarity search query (pool + store already exist from Phase 1)
+2. `internal/gemini` — add query-time embedding (client already exists from Phase 1; reuse for embed-at-query)
 3. `internal/llm` — Anthropic Claude client (streaming)
 4. `internal/rag` — retrieval pipeline: query → embed → similarity search → retrieve chunks → build prompt → stream response
 5. Verify end-to-end: ask a question via a test harness, get a grounded answer back
@@ -31,11 +31,12 @@
 ## Phase 4: Polish + Deploy
 **Goal:** Production-ready on GKE.
 
-1. Cloudflare DNS + proxying for `sre.bible` (rate limiting configured at Cloudflare level)
-2. Kubernetes manifests (Deployment, Service, ConfigMap, Secret for API keys)
-3. Cloud SQL Auth Proxy sidecar
-4. Header: name, title, one-liner bio
-5. Final suggested questions tuned to strongest talking points
+1. Provision Cloud SQL instance with pgvector enabled; re-ingest all Sources against Cloud SQL
+2. Cloudflare DNS + proxying for `sre.bible` (rate limiting configured at Cloudflare level)
+3. Kubernetes manifests (Deployment, Service, ConfigMap, Secret for API keys)
+4. Cloud SQL Auth Proxy sidecar
+5. Header: name, title, one-liner bio
+6. Final suggested questions tuned to strongest talking points
 
 ## Key Architectural Decisions
 See `docs/adr/` for rationale on:
