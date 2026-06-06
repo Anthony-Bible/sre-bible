@@ -13,7 +13,7 @@ FROM gcr.io/distroless/static-debian12:nonroot
 
 COPY --from=builder /server /server
 
-USER nonroot:nonroot
+USER 65532
 
 EXPOSE 8080
 
