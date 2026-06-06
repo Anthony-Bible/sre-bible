@@ -8,7 +8,7 @@ import (
 	"google.golang.org/genai"
 )
 
-const extractionModel = "gemini-2.0-flash"
+const extractionModel = "gemini-3.5-flash"
 
 const extractionPrompt = "Extract the full text content of this document as clean markdown. " +
 	"Preserve headings, bullet points, and structure. Do not add commentary or explanation."

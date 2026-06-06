@@ -1,4 +1,4 @@
-.PHONY: db-up db-down migrate test ingest deps lint
+.PHONY: db-up db-down migrate test ingest query deps lint
 
 DATABASE_URL ?= postgres://sre:sre@localhost:5432/sre_bible?sslmode=disable
 TEST_DATABASE_URL ?= $(DATABASE_URL)
@@ -33,6 +33,11 @@ test-integration: db-up
 ingest:
 	@if [ -z "$(SRC)" ]; then echo "Usage: make ingest SRC=<path-or-url>"; exit 1; fi
 	DATABASE_URL=$(DATABASE_URL) GEMINI_API_KEY=$(GEMINI_API_KEY) go run ./cmd/ingest "$(SRC)"
+
+query:
+	@if [ -z "$(Q)" ]; then echo "Usage: make query Q=\"<question>\""; exit 1; fi
+	DATABASE_URL=$(DATABASE_URL) GEMINI_API_KEY=$(GEMINI_API_KEY) ANTHROPIC_API_KEY=$(ANTHROPIC_API_KEY) \
+		go run ./cmd/query "$(Q)"
 
 deps:
 	go mod tidy

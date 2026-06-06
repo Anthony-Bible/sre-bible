@@ -34,3 +34,6 @@ A curated set of 3–4 hardcoded prompts displayed to the Viewer before their fi
 
 ### Citation
 A footnote-style source attribution displayed at the bottom of each Resume Agent response, listing which Sources the answer was drawn from (e.g., `resume.pdf`, `anthonybible.com/about`). Citations are source-level, not chunk-level.
+
+### Message
+A single conversational turn within a Session. Each Message has a role (`user` or `assistant`) and a text content. User Messages contain the Viewer's question. Assistant Messages contain the Resume Agent's response. Messages are persisted to Cloud SQL and are visible to the Owner for analytics.

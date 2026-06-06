@@ -11,6 +11,7 @@ import (
 	pgvector "github.com/pgvector/pgvector-go"
 
 	"github.com/Anthony-Bible/sre-bible/internal/ingest"
+	"github.com/Anthony-Bible/sre-bible/internal/rag"
 )
 
 // SourceStore persists sources and chunks.
@@ -19,8 +20,11 @@ type SourceStore struct {
 	logger *slog.Logger
 }
 
-// compile-time assertion: SourceStore implements ingest.SourceRepository.
-var _ ingest.SourceRepository = (*SourceStore)(nil)
+// compile-time assertions.
+var (
+	_ ingest.SourceRepository = (*SourceStore)(nil)
+	_ rag.ChunkSearcher       = (*SourceStore)(nil)
+)
 
 // NewSourceStore creates a SourceStore backed by pool.
 // Pass a non-nil logger to route structured log output; if logger is nil, slog.Default() is used.
@@ -99,4 +103,34 @@ func insertChunks(ctx context.Context, tx pgx.Tx, sourceID int64, chunks []inges
 		return fmt.Errorf("insert chunks: %w", err)
 	}
 	return nil
+}
+
+// SearchChunks returns the limit most semantically similar RetrievedChunks
+// for queryEmbedding, ordered by ascending cosine distance (most similar first).
+func (s *SourceStore) SearchChunks(ctx context.Context, queryEmbedding []float32, limit int) ([]rag.RetrievedChunk, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT c.content, s.name
+		FROM   chunks c
+		JOIN   sources s ON s.id = c.source_id
+		ORDER  BY c.embedding <=> $1
+		LIMIT  $2`,
+		pgvector.NewVector(queryEmbedding), limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("search chunks: %w", err)
+	}
+	defer rows.Close()
+
+	var results []rag.RetrievedChunk
+	for rows.Next() {
+		var rc rag.RetrievedChunk
+		if err := rows.Scan(&rc.Content, &rc.SourceName); err != nil {
+			return nil, fmt.Errorf("scan chunk: %w", err)
+		}
+		results = append(results, rc)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("search chunks rows: %w", err)
+	}
+	return results, nil
 }

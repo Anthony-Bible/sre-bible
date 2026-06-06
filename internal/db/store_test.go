@@ -454,6 +454,40 @@ func TestReplaceSource_TwoSourcesCoexist(t *testing.T) {
 	}
 }
 
+// --- Contract 6: Vector similarity search ---
+
+// TestSearchChunks verifies that SearchChunks returns the most similar chunk first.
+func TestSearchChunks(t *testing.T) {
+	pool, cleanup := testDB(t)
+	defer cleanup()
+
+	store := db.NewSourceStore(pool, slog.Default())
+
+	srcA := ingest.Source{Name: "search-a", Type: "pdf", Location: "/a.pdf"}
+	srcB := ingest.Source{Name: "search-b", Type: "url", Location: "https://b.example.com"}
+
+	chunksA := []ingest.Chunk{{Idx: 0, Content: "close chunk", Embedding: makeEmbedding(1.0)}}
+	chunksB := []ingest.Chunk{{Idx: 0, Content: "far chunk", Embedding: makeEmbedding(100.0)}}
+
+	if err := store.ReplaceSource(context.Background(), srcA, chunksA); err != nil {
+		t.Fatalf("ingest A: %v", err)
+	}
+	if err := store.ReplaceSource(context.Background(), srcB, chunksB); err != nil {
+		t.Fatalf("ingest B: %v", err)
+	}
+
+	results, err := store.SearchChunks(context.Background(), makeEmbedding(1.1), 5)
+	if err != nil {
+		t.Fatalf("SearchChunks: %v", err)
+	}
+	if len(results) < 1 {
+		t.Fatalf("expected at least 1 result, got 0")
+	}
+	if results[0].SourceName != "search-a" {
+		t.Errorf("results[0].SourceName: got %q, want %q", results[0].SourceName, "search-a")
+	}
+}
+
 // TestReplaceSource_ReplacingOneSourceDoesNotAffectOther verifies that calling
 // ReplaceSource for source A does not alter the chunks belonging to source B.
 func TestReplaceSource_ReplacingOneSourceDoesNotAffectOther(t *testing.T) {
