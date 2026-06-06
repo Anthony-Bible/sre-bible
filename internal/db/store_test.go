@@ -93,7 +93,7 @@ func TestReplaceSource_InsertsSourceRow(t *testing.T) {
 	pool, cleanup := testDB(t)
 	defer cleanup()
 
-	store := db.NewSourceStore(pool)
+	store := db.NewSourceStore(pool, slog.Default())
 	src := db.Source{Name: "doc-a", Type: "pdf", Location: "s3://bucket/doc-a.pdf"}
 	chunks := []db.Chunk{
 		{Idx: 0, Content: "hello world", Embedding: makeEmbedding(1)},
@@ -116,7 +116,7 @@ func TestReplaceSource_InsertsNChunkRows(t *testing.T) {
 	pool, cleanup := testDB(t)
 	defer cleanup()
 
-	store := db.NewSourceStore(pool)
+	store := db.NewSourceStore(pool, slog.Default())
 	src := db.Source{Name: "doc-b", Type: "url", Location: "https://example.com/doc-b"}
 	const chunkCount = 5
 	chunks := make([]db.Chunk, chunkCount)
@@ -146,7 +146,7 @@ func TestReplaceSource_ChunkIdxValuesAreSequential(t *testing.T) {
 	pool, cleanup := testDB(t)
 	defer cleanup()
 
-	store := db.NewSourceStore(pool)
+	store := db.NewSourceStore(pool, slog.Default())
 	src := db.Source{Name: "doc-idx", Type: "pdf", Location: "/local/doc-idx.pdf"}
 	const chunkCount = 4
 	chunks := make([]db.Chunk, chunkCount)
@@ -198,7 +198,7 @@ func TestReplaceSource_EmbeddingRoundTrips(t *testing.T) {
 	pool, cleanup := testDB(t)
 	defer cleanup()
 
-	store := db.NewSourceStore(pool)
+	store := db.NewSourceStore(pool, slog.Default())
 	src := db.Source{Name: "doc-embed", Type: "url", Location: "https://example.com/embed"}
 	want := makeEmbedding(42)
 	chunks := []db.Chunk{
@@ -243,7 +243,7 @@ func TestReplaceSource_ReplacesChunksOnSecondCall(t *testing.T) {
 	pool, cleanup := testDB(t)
 	defer cleanup()
 
-	store := db.NewSourceStore(pool)
+	store := db.NewSourceStore(pool, slog.Default())
 	src := db.Source{Name: "doc-replace", Type: "pdf", Location: "/replace.pdf"}
 
 	firstChunks := []db.Chunk{
@@ -280,7 +280,7 @@ func TestReplaceSource_DoesNotDuplicateSourceRow(t *testing.T) {
 	pool, cleanup := testDB(t)
 	defer cleanup()
 
-	store := db.NewSourceStore(pool)
+	store := db.NewSourceStore(pool, slog.Default())
 	src := db.Source{Name: "doc-dedup", Type: "url", Location: "https://example.com/dedup"}
 	chunk := db.Chunk{Idx: 0, Content: "x", Embedding: makeEmbedding(0)}
 
@@ -303,7 +303,7 @@ func TestReplaceSource_UpdatesSourceMetadataOnReplace(t *testing.T) {
 	pool, cleanup := testDB(t)
 	defer cleanup()
 
-	store := db.NewSourceStore(pool)
+	store := db.NewSourceStore(pool, slog.Default())
 	first := db.Source{Name: "doc-meta", Type: "pdf", Location: "/old.pdf"}
 	second := db.Source{Name: "doc-meta", Type: "url", Location: "https://new.example.com"}
 	chunk := db.Chunk{Idx: 0, Content: "content", Embedding: makeEmbedding(7)}
@@ -344,7 +344,7 @@ func TestReplaceSource_EmptyChunksLeavesConsistentState(t *testing.T) {
 	pool, cleanup := testDB(t)
 	defer cleanup()
 
-	store := db.NewSourceStore(pool)
+	store := db.NewSourceStore(pool, slog.Default())
 	src := db.Source{Name: "doc-empty", Type: "pdf", Location: "/empty.pdf"}
 
 	if err := store.ReplaceSource(context.Background(), src, []db.Chunk{}); err != nil {
@@ -377,7 +377,7 @@ func TestReplaceSource_EmptyChunksReplacesExistingChunks(t *testing.T) {
 	pool, cleanup := testDB(t)
 	defer cleanup()
 
-	store := db.NewSourceStore(pool)
+	store := db.NewSourceStore(pool, slog.Default())
 	src := db.Source{Name: "doc-clear", Type: "url", Location: "https://example.com/clear"}
 	initial := []db.Chunk{
 		{Idx: 0, Content: "a", Embedding: makeEmbedding(1)},
@@ -409,7 +409,7 @@ func TestReplaceSource_TwoSourcesCoexist(t *testing.T) {
 	pool, cleanup := testDB(t)
 	defer cleanup()
 
-	store := db.NewSourceStore(pool)
+	store := db.NewSourceStore(pool, slog.Default())
 
 	srcA := db.Source{Name: "doc-co-a", Type: "pdf", Location: "/a.pdf"}
 	srcB := db.Source{Name: "doc-co-b", Type: "url", Location: "https://example.com/b"}
@@ -459,7 +459,7 @@ func TestReplaceSource_ReplacingOneSourceDoesNotAffectOther(t *testing.T) {
 	pool, cleanup := testDB(t)
 	defer cleanup()
 
-	store := db.NewSourceStore(pool)
+	store := db.NewSourceStore(pool, slog.Default())
 
 	srcA := db.Source{Name: "doc-iso-a", Type: "pdf", Location: "/iso-a.pdf"}
 	srcB := db.Source{Name: "doc-iso-b", Type: "url", Location: "https://example.com/iso-b"}
