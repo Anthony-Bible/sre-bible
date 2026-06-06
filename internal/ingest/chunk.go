@@ -14,20 +14,10 @@ func Chunk(text string) []string {
 }
 
 func chunkWithConfig(text string, target, hardCap, overlap int) []string {
-	// Contract 5: empty/whitespace-only input → nil
 	runes := []rune(text)
-	hasContent := false
-	for _, r := range runes {
-		if !isSpace(r) {
-			hasContent = true
-			break
-		}
-	}
-	if !hasContent {
+	if !isNonEmpty(text) {
 		return nil
 	}
-
-	// Contract 6: input ≤ hardCap → single chunk returned verbatim
 	if len(runes) <= hardCap {
 		return []string{text}
 	}
@@ -45,8 +35,6 @@ func chunkWithConfig(text string, target, hardCap, overlap int) []string {
 			break
 		}
 
-		// Find the best split point within [target, hardCap] from start.
-		// Prefer \n\n > \n > space > hard cut.
 		splitAt := findSplitPoint(runes, start, target, hardCap)
 
 		chunk := string(runes[start:splitAt])
@@ -54,17 +42,15 @@ func chunkWithConfig(text string, target, hardCap, overlap int) []string {
 			chunks = append(chunks, chunk)
 		}
 
-		// Advance start so next chunk begins overlap chars before splitAt,
-		// anchored at a word boundary.
+		// Back up overlap chars before the split and snap to a word boundary
+		// so the next chunk begins at a clean word start.
 		nextStart := splitAt - overlap
 		if nextStart < start+1 {
 			nextStart = start + 1
 		}
-		// Walk nextStart forward to a word boundary (start of a word).
 		nextStart = wordBoundaryForward(runes, nextStart)
 		if nextStart >= splitAt {
-			// Pathological: just advance by 1 to avoid infinite loop
-			nextStart = start + 1
+			nextStart = start + 1 // guard against infinite loop on pathological input
 		}
 		start = nextStart
 	}
@@ -73,83 +59,91 @@ func chunkWithConfig(text string, target, hardCap, overlap int) []string {
 }
 
 // findSplitPoint returns the index (exclusive end) of the best split point
-// for the slice runes[start:]. Prefers \n\n > \n > space > hard cut.
+// for the slice runes[start:]. Boundary quality ranks as \n\n > \n > space > hard cut.
+// Among equal-quality boundaries, the one at or after start+target is preferred so
+// chunks land near the target size rather than splitting as early as possible.
 func findSplitPoint(runes []rune, start, target, hardCap int) int {
 	end := start + hardCap
 	if end > len(runes) {
 		end = len(runes)
 	}
-	_ = target // target is used by callers to decide whether to split at all
-	if pos := lastParaBreak(runes, start, end); pos > 0 {
+	preferred := start + target
+	if preferred > end {
+		preferred = end
+	}
+
+	// For each boundary type, try the preferred window first, then widen to the
+	// full [start, end) window. Quality ordering is preserved across the two windows.
+	if pos, ok := lastParaBreak(runes, preferred, end); ok {
 		return pos
 	}
-	if pos := lastNewline(runes, start, end); pos > 0 {
+	if pos, ok := lastParaBreak(runes, start, end); ok {
 		return pos
 	}
-	if pos := lastSpace(runes, start, end); pos > 0 {
+	if pos, ok := lastNewline(runes, preferred, end); ok {
 		return pos
 	}
+	if pos, ok := lastNewline(runes, start, end); ok {
+		return pos
+	}
+	if pos, ok := lastSpace(runes, preferred, end); ok {
+		return pos
+	}
+	if pos, ok := lastSpace(runes, start, end); ok {
+		return pos
+	}
+
 	return end
 }
 
-// lastParaBreak returns the position after the last \n\n in runes[start:end],
-// or 0 if none exists.
-func lastParaBreak(runes []rune, start, end int) int {
-	for i := end - 1; i >= start+1; i-- {
+// lastParaBreak returns the position after the last \n\n in runes[lo:end].
+func lastParaBreak(runes []rune, lo, end int) (int, bool) {
+	for i := end - 1; i >= lo+1; i-- {
 		if runes[i] == '\n' && runes[i-1] == '\n' {
 			pos := i + 1
 			if pos > end {
-				return end
+				return end, true
 			}
-			return pos
+			return pos, true
 		}
 	}
-	return 0
+	return 0, false
 }
 
-// lastNewline returns the position after the last \n in runes[start:end],
-// or 0 if none exists.
-func lastNewline(runes []rune, start, end int) int {
-	for i := end - 1; i >= start+1; i-- {
+// lastNewline returns the position after the last \n in runes[lo:end].
+func lastNewline(runes []rune, lo, end int) (int, bool) {
+	for i := end - 1; i >= lo+1; i-- {
 		if runes[i] == '\n' {
-			return i + 1
+			return i + 1, true
 		}
 	}
-	return 0
+	return 0, false
 }
 
-// lastSpace returns the position after the last space/tab in runes[start:end],
-// or 0 if none exists.
-func lastSpace(runes []rune, start, end int) int {
-	for i := end - 1; i >= start+1; i-- {
+// lastSpace returns the position after the last space/tab in runes[lo:end].
+func lastSpace(runes []rune, lo, end int) (int, bool) {
+	for i := end - 1; i >= lo+1; i-- {
 		if runes[i] == ' ' || runes[i] == '\t' {
-			return i + 1
+			return i + 1, true
 		}
 	}
-	return 0
+	return 0, false
 }
 
-// wordBoundaryForward scans forward from pos until it finds the start of a
-// word (a non-space rune preceded by a space, or the very start). Returns pos
-// if already at a word boundary.
+// wordBoundaryForward advances pos to the start of the next word when pos
+// lands mid-word or on whitespace, ensuring overlap regions begin cleanly.
 func wordBoundaryForward(runes []rune, pos int) int {
-	// Scan forward to skip any partial word we're in the middle of.
-	// If the char at pos is non-space and the char before it is also non-space,
-	// we're mid-word — advance to next space then to next word.
 	if pos <= 0 || pos >= len(runes) {
 		return pos
 	}
 	if !isSpace(runes[pos]) && !isSpace(runes[pos-1]) {
-		// mid-word: advance to end of this word
 		for pos < len(runes) && !isSpace(runes[pos]) {
 			pos++
 		}
-		// skip whitespace
 		for pos < len(runes) && isSpace(runes[pos]) {
 			pos++
 		}
 	} else if isSpace(runes[pos]) {
-		// on whitespace: skip to next word
 		for pos < len(runes) && isSpace(runes[pos]) {
 			pos++
 		}
