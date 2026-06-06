@@ -5,9 +5,37 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Anthony-Bible/sre-bible/internal/rag"
 )
+
+// handleHealthz is the liveness probe endpoint. Always returns 200.
+// A DB outage must not cause a crash-loop restart, so this never calls the pinger.
+func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"status":"ok"}`))
+}
+
+// handleReadyz is the readiness probe endpoint. Checks DB reachability via s.pinger.
+// Returns 503 if pinger is nil or if Ping fails.
+func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	if s.pinger == nil {
+		http.Error(w, `{"status":"no pinger"}`, http.StatusServiceUnavailable)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	if err := s.pinger.Ping(ctx); err != nil {
+		s.log.ErrorContext(ctx, "readyz ping failed", slog.Any("err", err))
+		http.Error(w, `{"status":"unavailable"}`, http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"status":"ok"}`))
+}
 
 type chatData struct {
 	Messages           []renderedMessage
@@ -54,7 +82,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	data := chatData{
 		Messages:           msgs,
 		ShowSuggestions:    len(stored) == 0,
-		SuggestedQuestions: suggestedQuestions,
+		SuggestedQuestions: defaultSuggestedQuestions(),
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

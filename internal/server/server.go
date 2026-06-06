@@ -19,6 +19,11 @@ type Answerer interface {
 	Answer(ctx context.Context, history []rag.Message, question string, onToken func(string) error) ([]string, error)
 }
 
+// Pinger is the port for database liveness checks. Satisfied by *pgxpool.Pool.
+type Pinger interface {
+	Ping(ctx context.Context) error
+}
+
 // StoredMessage is a Message with its persisted citation list, used for page rendering.
 type StoredMessage struct {
 	rag.Message
@@ -39,21 +44,25 @@ type SessionRepository interface {
 type Server struct {
 	pipeline  Answerer
 	sessions  SessionRepository
+	pinger    Pinger
 	templates *template.Template
 	log       *slog.Logger
 	mux       *http.ServeMux
 }
 
-// suggestedQuestions are shown on first load when there is no session history.
-var suggestedQuestions = []string{
-	"What is Anthony's experience with Kubernetes and GKE?",
-	"How has Anthony approached platform reliability at scale?",
-	"What does Anthony's incident management background look like?",
-	"What SRE practices has Anthony championed in past roles?",
+// defaultSuggestedQuestions returns the prompts shown on first load when there
+// is no session history. Returned as a function to satisfy gochecknoglobals.
+func defaultSuggestedQuestions() []string {
+	return []string{
+		"What is Anthony's experience with Kubernetes and GKE?",
+		"How has Anthony approached platform reliability at scale?",
+		"What does Anthony's incident management background look like?",
+		"What SRE practices has Anthony championed in past roles?",
+	}
 }
 
 // NewServer creates a Server, parses embedded templates, and registers routes.
-func NewServer(pipeline Answerer, sessions SessionRepository, log *slog.Logger) (*Server, error) {
+func NewServer(pipeline Answerer, sessions SessionRepository, pinger Pinger, log *slog.Logger) (*Server, error) {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -69,6 +78,7 @@ func NewServer(pipeline Answerer, sessions SessionRepository, log *slog.Logger) 
 	s := &Server{
 		pipeline:  pipeline,
 		sessions:  sessions,
+		pinger:    pinger,
 		templates: t,
 		log:       log,
 		mux:       mux,
@@ -76,6 +86,8 @@ func NewServer(pipeline Answerer, sessions SessionRepository, log *slog.Logger) 
 
 	mux.HandleFunc("GET /", s.handleIndex)
 	mux.HandleFunc("POST /chat", s.handleChat)
+	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	mux.HandleFunc("GET /readyz", s.handleReadyz)
 
 	return s, nil
 }

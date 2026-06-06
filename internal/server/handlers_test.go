@@ -71,7 +71,7 @@ func (p *stubPipeline) Answer(_ context.Context, _ []rag.Message, _ string, onTo
 // route registration path (including mux wiring) is exercised.
 func newTestServer(t *testing.T, pipeline Answerer, sessions SessionRepository) *Server {
 	t.Helper()
-	srv, err := NewServer(pipeline, sessions, nil)
+	srv, err := NewServer(pipeline, sessions, nil, nil)
 	if err != nil {
 		t.Fatalf("NewServer returned unexpected error: %v", err)
 	}

@@ -78,7 +78,7 @@ func run(log *slog.Logger) error {
 	llmClient := llm.NewClient(anthropicKey, model, rag.SystemPrompt, log)
 	pipeline := rag.NewPipeline(geminiClient, sourceStore, llmClient, 0, log)
 
-	srv, err := server.NewServer(pipeline, sessionStore, log)
+	srv, err := server.NewServer(pipeline, sessionStore, pool, log)
 	if err != nil {
 		return fmt.Errorf("create server: %w", err)
 	}

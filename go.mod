@@ -1,6 +1,6 @@
 module github.com/Anthony-Bible/sre-bible
 
-go 1.24.0
+go 1.26.0
 
 require (
 	codeberg.org/readeck/go-readability v0.0.0-20251125211941-0f57a445e5f1
