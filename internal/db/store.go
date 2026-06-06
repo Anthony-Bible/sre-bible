@@ -9,31 +9,18 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	pgvector "github.com/pgvector/pgvector-go"
+
+	"github.com/Anthony-Bible/sre-bible/internal/ingest"
 )
-
-// Source is a document or URL in the knowledge base.
-// ID is assigned by the database on first insert and should be treated as read-only by callers.
-type Source struct {
-	ID       int64
-	Name     string
-	Type     string
-	Location string
-}
-
-// Chunk is a contiguous text segment of a Source together with its vector embedding.
-// Idx is the zero-based position of the chunk within its parent source and must be
-// unique per source; callers are responsible for assigning sequential values.
-type Chunk struct {
-	Idx       int
-	Content   string
-	Embedding []float32
-}
 
 // SourceStore persists sources and chunks.
 type SourceStore struct {
 	pool   *pgxpool.Pool
 	logger *slog.Logger
 }
+
+// compile-time assertion: SourceStore implements ingest.SourceRepository.
+var _ ingest.SourceRepository = (*SourceStore)(nil)
 
 // NewSourceStore creates a SourceStore backed by pool.
 // Pass a non-nil logger to route structured log output; if logger is nil, slog.Default() is used.
@@ -45,7 +32,7 @@ func NewSourceStore(pool *pgxpool.Pool, logger *slog.Logger) *SourceStore {
 }
 
 // ReplaceSource atomically upserts the source row and replaces all its chunks.
-func (s *SourceStore) ReplaceSource(ctx context.Context, src Source, chunks []Chunk) error {
+func (s *SourceStore) ReplaceSource(ctx context.Context, src ingest.Source, chunks []ingest.Chunk) error {
 	start := time.Now()
 
 	tx, err := s.pool.Begin(ctx)
@@ -79,7 +66,7 @@ func (s *SourceStore) ReplaceSource(ctx context.Context, src Source, chunks []Ch
 	return nil
 }
 
-func upsertSource(ctx context.Context, tx pgx.Tx, src Source) (int64, error) {
+func upsertSource(ctx context.Context, tx pgx.Tx, src ingest.Source) (int64, error) {
 	var id int64
 	err := tx.QueryRow(ctx, `
 		INSERT INTO sources (name, type, location, updated_at)
@@ -97,7 +84,7 @@ func upsertSource(ctx context.Context, tx pgx.Tx, src Source) (int64, error) {
 	return id, nil
 }
 
-func insertChunks(ctx context.Context, tx pgx.Tx, sourceID int64, chunks []Chunk) error {
+func insertChunks(ctx context.Context, tx pgx.Tx, sourceID int64, chunks []ingest.Chunk) error {
 	rows := make([][]any, len(chunks))
 	for i, c := range chunks {
 		rows[i] = []any{sourceID, c.Idx, c.Content, pgvector.NewVector(c.Embedding)}

@@ -6,10 +6,10 @@ const (
 	chunkOverlap = 200
 )
 
-// Chunk splits text into overlapping segments targeting ~1000 chars with ~200-char overlap.
+// ChunkText splits text into overlapping segments targeting ~1000 chars with ~200-char overlap.
 // Hard cap per chunk is 1200 chars. Splits prefer paragraph (\n\n) then newline then word
 // boundary — never mid-word. Returns nil for empty or whitespace-only input.
-func Chunk(text string) []string {
+func ChunkText(text string) []string {
 	return chunkWithConfig(text, chunkTarget, chunkHardCap, chunkOverlap)
 }
 

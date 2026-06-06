@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-
-	"github.com/Anthony-Bible/sre-bible/internal/db"
 )
 
 // Embedder produces vector embeddings for a batch of texts.
@@ -29,12 +27,12 @@ type Pipeline struct {
 	pdfExtractor PDFExtractor
 	urlExtractor URLExtractor
 	embedder     Embedder
-	store        *db.SourceStore
+	store        SourceRepository
 	log          *slog.Logger
 }
 
 // NewPipeline creates a Pipeline wired with the provided dependencies.
-func NewPipeline(pdfExtractor PDFExtractor, embedder Embedder, urlExtractor URLExtractor, store *db.SourceStore, log *slog.Logger) *Pipeline {
+func NewPipeline(pdfExtractor PDFExtractor, embedder Embedder, urlExtractor URLExtractor, store SourceRepository, log *slog.Logger) *Pipeline {
 	return &Pipeline{
 		pdfExtractor: pdfExtractor,
 		urlExtractor: urlExtractor,
@@ -58,7 +56,7 @@ func (p *Pipeline) Run(ctx context.Context, location string) error {
 		return fmt.Errorf("extract text from %s: %w", name, err)
 	}
 
-	segments := Chunk(text)
+	segments := ChunkText(text)
 	p.log.InfoContext(ctx, "chunked source", "name", name, "chunks", len(segments))
 
 	embeddings, err := p.embedder.EmbedDocuments(ctx, segments)
@@ -66,16 +64,16 @@ func (p *Pipeline) Run(ctx context.Context, location string) error {
 		return fmt.Errorf("embed chunks for %s: %w", name, err)
 	}
 
-	chunks := make([]db.Chunk, len(segments))
+	chunks := make([]Chunk, len(segments))
 	for i, seg := range segments {
-		chunks[i] = db.Chunk{
+		chunks[i] = Chunk{
 			Idx:       i,
 			Content:   seg,
 			Embedding: embeddings[i],
 		}
 	}
 
-	src := db.Source{Name: name, Type: srcType, Location: location}
+	src := Source{Name: name, Type: srcType, Location: location}
 	if err := p.store.ReplaceSource(ctx, src, chunks); err != nil {
 		return fmt.Errorf("store source %s: %w", name, err)
 	}

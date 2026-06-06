@@ -45,7 +45,7 @@ func TestChunk_HardCapEnforced(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			chunks := Chunk(tc.input)
+			chunks := ChunkText(tc.input)
 			if len(chunks) == 0 {
 				t.Fatal("Chunk returned nil/empty slice for non-empty input")
 			}
@@ -65,7 +65,7 @@ func TestChunk_HardCapEnforced(t *testing.T) {
 func TestChunk_OverlapBetweenConsecutiveChunks(t *testing.T) {
 	// Use a large enough input to produce at least 3 chunks.
 	input := makeText(5000)
-	chunks := Chunk(input)
+	chunks := ChunkText(input)
 	if len(chunks) < 2 {
 		t.Fatalf("expected at least 2 chunks, got %d — cannot verify overlap", len(chunks))
 	}
@@ -123,7 +123,7 @@ func TestChunk_NoEmptyChunks(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			chunks := Chunk(tc.input)
+			chunks := ChunkText(tc.input)
 			if len(chunks) == 0 {
 				t.Fatal("Chunk returned nil/empty slice for non-empty input")
 			}
@@ -162,7 +162,7 @@ func TestChunk_FullCoverage(t *testing.T) {
 	// order). We check via frequency counting.
 
 	input := makeParagraphs(8, 400)
-	chunks := Chunk(input)
+	chunks := ChunkText(input)
 	if len(chunks) == 0 {
 		t.Fatal("Chunk returned nil/empty slice for non-empty input")
 	}
@@ -215,7 +215,7 @@ func TestChunk_EmptyAndWhitespaceInputReturnsNil(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			result := Chunk(tc.input)
+			result := ChunkText(tc.input)
 			if result != nil {
 				t.Errorf("Chunk(%q) = %v, want nil", tc.input, result)
 			}
@@ -242,7 +242,7 @@ func TestChunk_ShortInputReturnsSingleChunk(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			chunks := Chunk(tc.input)
+			chunks := ChunkText(tc.input)
 			if len(chunks) != 1 {
 				t.Errorf("Chunk returned %d chunks for input of length %d, want exactly 1", len(chunks), len(tc.input))
 			}
@@ -272,7 +272,7 @@ func TestChunk_ParagraphBoundaryPreferredOverWordBoundary(t *testing.T) {
 	secondPara = (secondPara + strings.Repeat("bravo ", 200))[:600]
 	input := firstPara + "\n\n" + secondPara
 
-	chunks := Chunk(input)
+	chunks := ChunkText(input)
 	if len(chunks) < 2 {
 		t.Fatalf("expected at least 2 chunks, got %d", len(chunks))
 	}

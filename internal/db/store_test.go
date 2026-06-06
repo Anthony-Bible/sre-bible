@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Anthony-Bible/sre-bible/internal/db"
+	"github.com/Anthony-Bible/sre-bible/internal/ingest"
 )
 
 // testDB sets up a pool and migrates the schema, skipping if TEST_DATABASE_URL is unset.
@@ -94,8 +95,8 @@ func TestReplaceSource_InsertsSourceRow(t *testing.T) {
 	defer cleanup()
 
 	store := db.NewSourceStore(pool, slog.Default())
-	src := db.Source{Name: "doc-a", Type: "pdf", Location: "s3://bucket/doc-a.pdf"}
-	chunks := []db.Chunk{
+	src := ingest.Source{Name: "doc-a", Type: "pdf", Location: "s3://bucket/doc-a.pdf"}
+	chunks := []ingest.Chunk{
 		{Idx: 0, Content: "hello world", Embedding: makeEmbedding(1)},
 		{Idx: 1, Content: "foo bar", Embedding: makeEmbedding(2)},
 	}
@@ -117,11 +118,11 @@ func TestReplaceSource_InsertsNChunkRows(t *testing.T) {
 	defer cleanup()
 
 	store := db.NewSourceStore(pool, slog.Default())
-	src := db.Source{Name: "doc-b", Type: "url", Location: "https://example.com/doc-b"}
+	src := ingest.Source{Name: "doc-b", Type: "url", Location: "https://example.com/doc-b"}
 	const chunkCount = 5
-	chunks := make([]db.Chunk, chunkCount)
+	chunks := make([]ingest.Chunk, chunkCount)
 	for i := range chunks {
-		chunks[i] = db.Chunk{Idx: i, Content: "chunk content", Embedding: makeEmbedding(float32(i))}
+		chunks[i] = ingest.Chunk{Idx: i, Content: "chunk content", Embedding: makeEmbedding(float32(i))}
 	}
 
 	if err := store.ReplaceSource(context.Background(), src, chunks); err != nil {
@@ -147,11 +148,11 @@ func TestReplaceSource_ChunkIdxValuesAreSequential(t *testing.T) {
 	defer cleanup()
 
 	store := db.NewSourceStore(pool, slog.Default())
-	src := db.Source{Name: "doc-idx", Type: "pdf", Location: "/local/doc-idx.pdf"}
+	src := ingest.Source{Name: "doc-idx", Type: "pdf", Location: "/local/doc-idx.pdf"}
 	const chunkCount = 4
-	chunks := make([]db.Chunk, chunkCount)
+	chunks := make([]ingest.Chunk, chunkCount)
 	for i := range chunks {
-		chunks[i] = db.Chunk{Idx: i, Content: "content", Embedding: makeEmbedding(float32(i + 10))}
+		chunks[i] = ingest.Chunk{Idx: i, Content: "content", Embedding: makeEmbedding(float32(i + 10))}
 	}
 
 	if err := store.ReplaceSource(context.Background(), src, chunks); err != nil {
@@ -199,9 +200,9 @@ func TestReplaceSource_EmbeddingRoundTrips(t *testing.T) {
 	defer cleanup()
 
 	store := db.NewSourceStore(pool, slog.Default())
-	src := db.Source{Name: "doc-embed", Type: "url", Location: "https://example.com/embed"}
+	src := ingest.Source{Name: "doc-embed", Type: "url", Location: "https://example.com/embed"}
 	want := makeEmbedding(42)
-	chunks := []db.Chunk{
+	chunks := []ingest.Chunk{
 		{Idx: 0, Content: "embedding test", Embedding: want},
 	}
 
@@ -244,9 +245,9 @@ func TestReplaceSource_ReplacesChunksOnSecondCall(t *testing.T) {
 	defer cleanup()
 
 	store := db.NewSourceStore(pool, slog.Default())
-	src := db.Source{Name: "doc-replace", Type: "pdf", Location: "/replace.pdf"}
+	src := ingest.Source{Name: "doc-replace", Type: "pdf", Location: "/replace.pdf"}
 
-	firstChunks := []db.Chunk{
+	firstChunks := []ingest.Chunk{
 		{Idx: 0, Content: "first-0", Embedding: makeEmbedding(1)},
 		{Idx: 1, Content: "first-1", Embedding: makeEmbedding(2)},
 		{Idx: 2, Content: "first-2", Embedding: makeEmbedding(3)},
@@ -255,7 +256,7 @@ func TestReplaceSource_ReplacesChunksOnSecondCall(t *testing.T) {
 		t.Fatalf("first ReplaceSource: %v", err)
 	}
 
-	secondChunks := []db.Chunk{
+	secondChunks := []ingest.Chunk{
 		{Idx: 0, Content: "second-0", Embedding: makeEmbedding(10)},
 	}
 	if err := store.ReplaceSource(context.Background(), src, secondChunks); err != nil {
@@ -281,11 +282,11 @@ func TestReplaceSource_DoesNotDuplicateSourceRow(t *testing.T) {
 	defer cleanup()
 
 	store := db.NewSourceStore(pool, slog.Default())
-	src := db.Source{Name: "doc-dedup", Type: "url", Location: "https://example.com/dedup"}
-	chunk := db.Chunk{Idx: 0, Content: "x", Embedding: makeEmbedding(0)}
+	src := ingest.Source{Name: "doc-dedup", Type: "url", Location: "https://example.com/dedup"}
+	chunk := ingest.Chunk{Idx: 0, Content: "x", Embedding: makeEmbedding(0)}
 
 	for i := range 2 {
-		if err := store.ReplaceSource(context.Background(), src, []db.Chunk{chunk}); err != nil {
+		if err := store.ReplaceSource(context.Background(), src, []ingest.Chunk{chunk}); err != nil {
 			t.Fatalf("call %d: ReplaceSource: %v", i+1, err)
 		}
 	}
@@ -304,14 +305,14 @@ func TestReplaceSource_UpdatesSourceMetadataOnReplace(t *testing.T) {
 	defer cleanup()
 
 	store := db.NewSourceStore(pool, slog.Default())
-	first := db.Source{Name: "doc-meta", Type: "pdf", Location: "/old.pdf"}
-	second := db.Source{Name: "doc-meta", Type: "url", Location: "https://new.example.com"}
-	chunk := db.Chunk{Idx: 0, Content: "content", Embedding: makeEmbedding(7)}
+	first := ingest.Source{Name: "doc-meta", Type: "pdf", Location: "/old.pdf"}
+	second := ingest.Source{Name: "doc-meta", Type: "url", Location: "https://new.example.com"}
+	chunk := ingest.Chunk{Idx: 0, Content: "content", Embedding: makeEmbedding(7)}
 
-	if err := store.ReplaceSource(context.Background(), first, []db.Chunk{chunk}); err != nil {
+	if err := store.ReplaceSource(context.Background(), first, []ingest.Chunk{chunk}); err != nil {
 		t.Fatalf("first call: %v", err)
 	}
-	if err := store.ReplaceSource(context.Background(), second, []db.Chunk{chunk}); err != nil {
+	if err := store.ReplaceSource(context.Background(), second, []ingest.Chunk{chunk}); err != nil {
 		t.Fatalf("second call: %v", err)
 	}
 
@@ -345,9 +346,9 @@ func TestReplaceSource_EmptyChunksLeavesConsistentState(t *testing.T) {
 	defer cleanup()
 
 	store := db.NewSourceStore(pool, slog.Default())
-	src := db.Source{Name: "doc-empty", Type: "pdf", Location: "/empty.pdf"}
+	src := ingest.Source{Name: "doc-empty", Type: "pdf", Location: "/empty.pdf"}
 
-	if err := store.ReplaceSource(context.Background(), src, []db.Chunk{}); err != nil {
+	if err := store.ReplaceSource(context.Background(), src, []ingest.Chunk{}); err != nil {
 		t.Fatalf("ReplaceSource with empty chunks: %v", err)
 	}
 
@@ -378,8 +379,8 @@ func TestReplaceSource_EmptyChunksReplacesExistingChunks(t *testing.T) {
 	defer cleanup()
 
 	store := db.NewSourceStore(pool, slog.Default())
-	src := db.Source{Name: "doc-clear", Type: "url", Location: "https://example.com/clear"}
-	initial := []db.Chunk{
+	src := ingest.Source{Name: "doc-clear", Type: "url", Location: "https://example.com/clear"}
+	initial := []ingest.Chunk{
 		{Idx: 0, Content: "a", Embedding: makeEmbedding(1)},
 		{Idx: 1, Content: "b", Embedding: makeEmbedding(2)},
 	}
@@ -387,7 +388,7 @@ func TestReplaceSource_EmptyChunksReplacesExistingChunks(t *testing.T) {
 	if err := store.ReplaceSource(context.Background(), src, initial); err != nil {
 		t.Fatalf("initial ReplaceSource: %v", err)
 	}
-	if err := store.ReplaceSource(context.Background(), src, []db.Chunk{}); err != nil {
+	if err := store.ReplaceSource(context.Background(), src, []ingest.Chunk{}); err != nil {
 		t.Fatalf("empty ReplaceSource: %v", err)
 	}
 
@@ -411,14 +412,14 @@ func TestReplaceSource_TwoSourcesCoexist(t *testing.T) {
 
 	store := db.NewSourceStore(pool, slog.Default())
 
-	srcA := db.Source{Name: "doc-co-a", Type: "pdf", Location: "/a.pdf"}
-	srcB := db.Source{Name: "doc-co-b", Type: "url", Location: "https://example.com/b"}
+	srcA := ingest.Source{Name: "doc-co-a", Type: "pdf", Location: "/a.pdf"}
+	srcB := ingest.Source{Name: "doc-co-b", Type: "url", Location: "https://example.com/b"}
 
-	chunksA := []db.Chunk{
+	chunksA := []ingest.Chunk{
 		{Idx: 0, Content: "a0", Embedding: makeEmbedding(1)},
 		{Idx: 1, Content: "a1", Embedding: makeEmbedding(2)},
 	}
-	chunksB := []db.Chunk{
+	chunksB := []ingest.Chunk{
 		{Idx: 0, Content: "b0", Embedding: makeEmbedding(3)},
 		{Idx: 1, Content: "b1", Embedding: makeEmbedding(4)},
 		{Idx: 2, Content: "b2", Embedding: makeEmbedding(5)},
@@ -461,19 +462,19 @@ func TestReplaceSource_ReplacingOneSourceDoesNotAffectOther(t *testing.T) {
 
 	store := db.NewSourceStore(pool, slog.Default())
 
-	srcA := db.Source{Name: "doc-iso-a", Type: "pdf", Location: "/iso-a.pdf"}
-	srcB := db.Source{Name: "doc-iso-b", Type: "url", Location: "https://example.com/iso-b"}
-	chunk := db.Chunk{Idx: 0, Content: "stable", Embedding: makeEmbedding(99)}
+	srcA := ingest.Source{Name: "doc-iso-a", Type: "pdf", Location: "/iso-a.pdf"}
+	srcB := ingest.Source{Name: "doc-iso-b", Type: "url", Location: "https://example.com/iso-b"}
+	chunk := ingest.Chunk{Idx: 0, Content: "stable", Embedding: makeEmbedding(99)}
 
-	if err := store.ReplaceSource(context.Background(), srcA, []db.Chunk{chunk}); err != nil {
+	if err := store.ReplaceSource(context.Background(), srcA, []ingest.Chunk{chunk}); err != nil {
 		t.Fatalf("seed A: %v", err)
 	}
-	if err := store.ReplaceSource(context.Background(), srcB, []db.Chunk{chunk}); err != nil {
+	if err := store.ReplaceSource(context.Background(), srcB, []ingest.Chunk{chunk}); err != nil {
 		t.Fatalf("seed B: %v", err)
 	}
 
 	// Replace A with three new chunks; B must remain untouched.
-	newChunksA := []db.Chunk{
+	newChunksA := []ingest.Chunk{
 		{Idx: 0, Content: "new-0", Embedding: makeEmbedding(20)},
 		{Idx: 1, Content: "new-1", Embedding: makeEmbedding(21)},
 		{Idx: 2, Content: "new-2", Embedding: makeEmbedding(22)},
