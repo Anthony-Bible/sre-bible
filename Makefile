@@ -1,4 +1,4 @@
-.PHONY: db-up db-down migrate test ingest query deps lint
+.PHONY: db-up db-down migrate test ingest query deps lint serve build-server
 
 DATABASE_URL ?= postgres://sre:sre@localhost:5432/sre_bible?sslmode=disable
 TEST_DATABASE_URL ?= $(DATABASE_URL)
@@ -45,3 +45,13 @@ deps:
 
 lint:
 	go vet ./...
+
+PORT ?= 8080
+
+serve: db-up
+	DATABASE_URL=$(DATABASE_URL) GEMINI_API_KEY=$(GEMINI_API_KEY) \
+	ANTHROPIC_API_KEY=$(ANTHROPIC_API_KEY) LISTEN_ADDR=:$(PORT) \
+	go run ./cmd/server
+
+build-server:
+	go build -o bin/server ./cmd/server

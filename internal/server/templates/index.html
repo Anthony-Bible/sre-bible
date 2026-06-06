@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SRE Bible — Anthony Bible</title>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            background: #f0f2f5;
+            color: #1a1a2e;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        header {
+            background: #1a1a2e;
+            color: white;
+            padding: 1rem 1.5rem;
+            flex-shrink: 0;
+            border-bottom: 2px solid #2563eb;
+        }
+        header h1 { font-size: 1.2rem; font-weight: 700; letter-spacing: -0.01em; }
+        header p { font-size: 0.8125rem; color: #94a3b8; margin-top: 0.2rem; }
+
+        #chat-container {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            max-width: 820px;
+            width: 100%;
+            margin: 0 auto;
+            padding: 1rem 1rem 0;
+            gap: 0.75rem;
+            overflow: hidden;
+            min-height: 0;
+        }
+
+        #chat-log {
+            flex: 1;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+            padding: 0.25rem 0;
+            min-height: 0;
+        }
+        #chat-log::-webkit-scrollbar { width: 4px; }
+        #chat-log::-webkit-scrollbar-track { background: transparent; }
+        #chat-log::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 2px; }
+
+        .message { display: flex; flex-direction: column; max-width: 82%; }
+        .message.user { align-self: flex-end; }
+        .message.assistant { align-self: flex-start; }
+
+        .msg-body {
+            padding: 0.6875rem 1rem;
+            border-radius: 1rem;
+            line-height: 1.65;
+            font-size: 0.9375rem;
+        }
+        .message.user .msg-body {
+            background: #2563eb;
+            color: white;
+            border-bottom-right-radius: 0.3rem;
+        }
+        .message.assistant .msg-body {
+            background: white;
+            color: #1a1a2e;
+            border: 1px solid #e2e8f0;
+            border-bottom-left-radius: 0.3rem;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+        }
+
+        /* markdown reset inside assistant bubbles */
+        .message.assistant .msg-body > *:first-child { margin-top: 0; }
+        .message.assistant .msg-body > *:last-child { margin-bottom: 0; }
+        .message.assistant .msg-body h1,
+        .message.assistant .msg-body h2,
+        .message.assistant .msg-body h3 { margin: 0.75rem 0 0.25rem; font-size: 1em; font-weight: 700; }
+        .message.assistant .msg-body p { margin-bottom: 0.5rem; }
+        .message.assistant .msg-body ul,
+        .message.assistant .msg-body ol { padding-left: 1.3rem; margin-bottom: 0.5rem; }
+        .message.assistant .msg-body li { margin-bottom: 0.2rem; }
+        .message.assistant .msg-body code {
+            background: #f1f5f9;
+            padding: 0.1rem 0.3rem;
+            border-radius: 0.25rem;
+            font-size: 0.875em;
+            font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+        }
+        .message.assistant .msg-body pre {
+            background: #1e293b;
+            color: #e2e8f0;
+            padding: 0.75rem 1rem;
+            border-radius: 0.5rem;
+            overflow-x: auto;
+            margin: 0.5rem 0;
+            font-size: 0.875em;
+        }
+        .message.assistant .msg-body pre code { background: none; padding: 0; color: inherit; }
+        .message.assistant .msg-body strong { font-weight: 700; }
+
+        .citations {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.3rem;
+            margin-top: 0.4rem;
+            padding: 0 0.2rem;
+        }
+        .citation {
+            font-size: 0.72rem;
+            color: #64748b;
+            background: #f1f5f9;
+            border: 1px solid #e2e8f0;
+            padding: 0.1rem 0.45rem;
+            border-radius: 999px;
+            white-space: nowrap;
+            max-width: 200px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        #suggestions {
+            display: flex;
+            flex-direction: column;
+            gap: 0.45rem;
+            padding: 0.25rem 0;
+        }
+        #suggestions button {
+            background: white;
+            border: 1px solid #dde3ed;
+            color: #2563eb;
+            padding: 0.6rem 1rem;
+            border-radius: 0.75rem;
+            cursor: pointer;
+            text-align: left;
+            font-size: 0.875rem;
+            font-family: inherit;
+            transition: background 0.12s, border-color 0.12s;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+        }
+        #suggestions button:hover {
+            background: #eff6ff;
+            border-color: #93c5fd;
+        }
+
+        #streaming-bubble { display: none; }
+
+        .streaming-cursor::after {
+            content: '▋';
+            animation: blink 0.9s step-end infinite;
+            color: #2563eb;
+        }
+        @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+
+        #form-wrapper {
+            flex-shrink: 0;
+            padding: 0.75rem 0 1rem;
+        }
+        #chat-form {
+            display: flex;
+            gap: 0.5rem;
+            align-items: flex-end;
+            background: white;
+            border: 1.5px solid #dde3ed;
+            border-radius: 1rem;
+            padding: 0.625rem 0.75rem;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+            transition: border-color 0.15s;
+        }
+        #chat-form:focus-within { border-color: #93c5fd; }
+
+        #question-input {
+            flex: 1;
+            border: none;
+            outline: none;
+            resize: none;
+            font-size: 0.9375rem;
+            font-family: inherit;
+            line-height: 1.5;
+            min-height: 1.5rem;
+            max-height: 7.5rem;
+            overflow-y: auto;
+            color: #1a1a2e;
+            background: transparent;
+        }
+        #question-input::placeholder { color: #94a3b8; }
+
+        #send-btn {
+            background: #2563eb;
+            color: white;
+            border: none;
+            padding: 0.45rem 1.1rem;
+            border-radius: 0.625rem;
+            cursor: pointer;
+            font-size: 0.875rem;
+            font-weight: 600;
+            font-family: inherit;
+            flex-shrink: 0;
+            transition: background 0.12s;
+            line-height: 1.5;
+        }
+        #send-btn:hover:not(:disabled) { background: #1d4ed8; }
+        #send-btn:disabled { background: #93c5fd; cursor: not-allowed; }
+
+        @media (max-width: 600px) {
+            .message { max-width: 96%; }
+            #chat-container { padding: 0.75rem 0.75rem 0; }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Anthony Bible</h1>
+        <p>Senior Site Reliability Engineer &amp; Platform Engineering Leader</p>
+    </header>
+
+    <div id="chat-container">
+        <div id="chat-log">
+            {{range .Messages}}
+            <div class="message {{.Role}}">
+                {{if eq .Role "user"}}
+                <div class="msg-body">{{.Content}}</div>
+                {{else}}
+                <div class="msg-body" data-content="{{.Content}}"></div>
+                {{if .Citations}}
+                <div class="citations">
+                    {{range $i, $c := .Citations}}
+                    <span class="citation">[{{add $i 1}}] {{$c}}</span>
+                    {{end}}
+                </div>
+                {{end}}
+                {{end}}
+            </div>
+            {{end}}
+        </div>
+
+        {{if .ShowSuggestions}}
+        <div id="suggestions">
+            {{range .SuggestedQuestions}}
+            <button onclick="submitQuestion(this.textContent)">{{.}}</button>
+            {{end}}
+        </div>
+        {{end}}
+
+        <div id="streaming-bubble" class="message assistant">
+            <div class="msg-body" id="streaming-content"></div>
+        </div>
+
+        <div id="form-wrapper">
+            <form id="chat-form" onsubmit="handleSubmit(event)">
+                <textarea id="question-input" name="question"
+                    placeholder="Ask about Anthony's experience..."
+                    rows="1"></textarea>
+                <button id="send-btn" type="submit">Send</button>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        marked.setOptions({ breaks: true, gfm: true });
+
+        document.addEventListener('DOMContentLoaded', () => {
+            document.querySelectorAll('.msg-body[data-content]').forEach(el => {
+                el.innerHTML = marked.parse(el.dataset.content);
+            });
+            scrollToBottom();
+
+            const textarea = document.getElementById('question-input');
+            textarea.addEventListener('input', autoResize);
+            textarea.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    document.getElementById('chat-form').dispatchEvent(
+                        new Event('submit', { bubbles: true, cancelable: true })
+                    );
+                }
+            });
+        });
+
+        function autoResize() {
+            this.style.height = 'auto';
+            this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+        }
+
+        function scrollToBottom() {
+            const log = document.getElementById('chat-log');
+            log.scrollTop = log.scrollHeight;
+        }
+
+        function escapeHTML(str) {
+            return str
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;');
+        }
+
+        function appendUserBubble(text) {
+            const log = document.getElementById('chat-log');
+            const div = document.createElement('div');
+            div.className = 'message user';
+            div.innerHTML = `<div class="msg-body">${escapeHTML(text)}</div>`;
+            log.appendChild(div);
+            scrollToBottom();
+        }
+
+        function showStreamingBubble() {
+            const bubble = document.getElementById('streaming-bubble');
+            const content = document.getElementById('streaming-content');
+            content.innerHTML = '<span class="streaming-cursor"></span>';
+            bubble.style.display = 'flex';
+            scrollToBottom();
+        }
+
+        function updateStreamingBubble(html) {
+            document.getElementById('streaming-content').innerHTML =
+                html + '<span class="streaming-cursor"></span>';
+            scrollToBottom();
+        }
+
+        function finalizeStreamingBubble(text, citations) {
+            const bubble = document.getElementById('streaming-bubble');
+            bubble.style.display = 'none';
+            document.getElementById('streaming-content').innerHTML = '';
+
+            const log = document.getElementById('chat-log');
+            const div = document.createElement('div');
+            div.className = 'message assistant';
+
+            let inner = `<div class="msg-body">${marked.parse(text)}</div>`;
+            if (citations && citations.length > 0) {
+                const cHtml = citations.map((c, i) =>
+                    `<span class="citation">[${i + 1}] ${escapeHTML(c)}</span>`
+                ).join('');
+                inner += `<div class="citations">${cHtml}</div>`;
+            }
+            div.innerHTML = inner;
+            log.appendChild(div);
+            scrollToBottom();
+
+            document.getElementById('send-btn').disabled = false;
+        }
+
+        function showError(msg) {
+            document.getElementById('streaming-bubble').style.display = 'none';
+            document.getElementById('streaming-content').innerHTML = '';
+
+            const log = document.getElementById('chat-log');
+            const div = document.createElement('div');
+            div.className = 'message assistant';
+            div.innerHTML = `<div class="msg-body" style="color:#dc2626;border-color:#fecaca;">⚠ ${escapeHTML(msg)}</div>`;
+            log.appendChild(div);
+            scrollToBottom();
+
+            document.getElementById('send-btn').disabled = false;
+        }
+
+        async function handleSubmit(e) {
+            e.preventDefault();
+            const q = document.getElementById('question-input').value.trim();
+            if (!q) return;
+
+            document.getElementById('question-input').value = '';
+            document.getElementById('question-input').style.height = 'auto';
+            document.getElementById('suggestions')?.remove();
+
+            appendUserBubble(q);
+            showStreamingBubble();
+            document.getElementById('send-btn').disabled = true;
+
+            let resp;
+            try {
+                resp = await fetch('/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: new URLSearchParams({ question: q }),
+                });
+            } catch (err) {
+                showError('Connection failed');
+                return;
+            }
+
+            if (!resp.ok) {
+                showError('Request failed');
+                return;
+            }
+
+            const reader = resp.body.getReader();
+            const dec = new TextDecoder();
+            let buf = '', accum = '';
+
+            try {
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    buf += dec.decode(value, { stream: true });
+                    const parts = buf.split('\n\n');
+                    buf = parts.pop();
+                    for (const chunk of parts) {
+                        let event = 'message', data = '';
+                        for (const line of chunk.split('\n')) {
+                            if (line.startsWith('event: ')) event = line.slice(7).trim();
+                            else if (line.startsWith('data: ')) data = line.slice(6).trim();
+                        }
+                        if (!data) continue;
+                        if (event === 'token') {
+                            accum += JSON.parse(data).t;
+                            updateStreamingBubble(marked.parse(accum));
+                        } else if (event === 'done') {
+                            finalizeStreamingBubble(accum, JSON.parse(data).citations);
+                        } else if (event === 'error') {
+                            showError(JSON.parse(data).msg);
+                        }
+                    }
+                }
+            } catch (err) {
+                showError('Stream interrupted');
+            }
+        }
+
+        function submitQuestion(text) {
+            document.getElementById('question-input').value = text;
+            document.getElementById('chat-form').dispatchEvent(
+                new Event('submit', { bubbles: true, cancelable: true })
+            );
+        }
+    </script>
+</body>
+</html>

@@ -130,3 +130,87 @@ No new ADR needed (local-first dev is easily reversible and unsurprising).
 3. `GEMINI_API_KEY=... DATABASE_URL=... go run ./cmd/ingest <some resume PDF>` — logs show chunks embedded + stored.
 4. psql smoke test: `SELECT name, count(*) FROM sources JOIN chunks ON chunks.source_id=sources.id GROUP BY name;` and a live cosine query: `SELECT idx, left(content,60), embedding <=> (SELECT embedding FROM chunks LIMIT 1) AS dist FROM chunks ORDER BY dist LIMIT 5;`
 5. Re-ingest the same PDF → chunk count stable, no duplicate source rows (replace-by-name verified).
+
+---
+
+# Hexagonal Architecture Refactor
+
+## Context
+
+Phase 1 shipped with a dependency violation: `internal/ingest/pipeline.go` imports `internal/db` for `*db.SourceStore`, `db.Source`, and `db.Chunk`. This inverts the correct direction — the domain core (`ingest`) must never depend on an infrastructure adapter (`db`). The fix moves domain types and the storage port into `ingest`, updates the `db` adapter to import those types and implement the port, and updates the integration tests accordingly. `cmd/ingest/main.go` requires no changes.
+
+**Wrong:** `ingest → db`  
+**Correct:** `db → ingest` (adapter depends on domain), `ingest` has zero internal imports
+
+## Files
+
+### 1. NEW `internal/ingest/domain.go`
+
+```go
+package ingest
+
+import "context"
+
+// Source is a document or URL in the knowledge base.
+// ID is absent — it is a database implementation detail, invisible to the domain.
+type Source struct {
+    Name     string
+    Type     string
+    Location string
+}
+
+// Chunk is a contiguous text segment with its vector embedding.
+// Callers assign sequential Idx values starting at 0.
+type Chunk struct {
+    Idx       int
+    Content   string
+    Embedding []float32
+}
+
+// SourceRepository is the storage port consumed by Pipeline.
+// Interface lives in the consumer package per the "accept interfaces" guideline.
+type SourceRepository interface {
+    ReplaceSource(ctx context.Context, src Source, chunks []Chunk) error
+}
+```
+
+### 2. EDIT `internal/ingest/pipeline.go`
+
+- Remove `import "github.com/Anthony-Bible/sre-bible/internal/db"` entirely
+- `store *db.SourceStore` → `store SourceRepository`
+- `NewPipeline(..., store *db.SourceStore, ...)` → `store SourceRepository`
+- `make([]db.Chunk, ...)` → `make([]Chunk, ...)`
+- `db.Chunk{...}` → `Chunk{...}`
+- `db.Source{...}` → `Source{...}`
+
+### 3. EDIT `internal/db/store.go`
+
+- Add `import "github.com/Anthony-Bible/sre-bible/internal/ingest"`
+- Delete exported `Source` struct (lines 16–21)
+- Delete exported `Chunk` struct (lines 23–30)
+- `ReplaceSource(ctx, src Source, chunks []Chunk)` → `src ingest.Source, chunks []ingest.Chunk`
+- `upsertSource(ctx, tx, src Source)` → `src ingest.Source` (body unchanged — same field names `Name`, `Type`, `Location`)
+- `insertChunks(ctx, tx, sourceID, chunks []Chunk)` → `chunks []ingest.Chunk` (body unchanged — `c.Idx`, `c.Content`, `c.Embedding` identical)
+- Add compile-time assertion after struct declaration: `var _ ingest.SourceRepository = (*SourceStore)(nil)`
+
+### 4. EDIT `internal/db/store_test.go`
+
+- Add `"github.com/Anthony-Bible/sre-bible/internal/ingest"` to imports (`db` import stays for `db.NewSourceStore`, `db.NewPool`, `db.Migrate`)
+- Replace all `db.Source{...}` → `ingest.Source{...}` (~10 occurrences)
+- Replace all `db.Chunk{...}`, `[]db.Chunk{...}` → `ingest.Chunk{...}`, `[]ingest.Chunk{...}` (~20 occurrences)
+
+### 5. `cmd/ingest/main.go` — no changes
+
+`*db.SourceStore` satisfies `ingest.SourceRepository` implicitly once its `ReplaceSource` signature matches the interface. The composition root can freely hold a concrete type; Go resolves the interface at the call site.
+
+## Verification
+
+```bash
+go build ./...                                        # catches import cycles + type mismatches
+go vet ./...
+go test ./internal/ingest/...                         # unit tests, no DB
+TEST_DATABASE_URL=<dsn> go test ./internal/db/...     # integration tests
+go list -f '{{.ImportPath}} → {{.Imports}}' ./internal/...
+# confirm: internal/ingest has no internal/ imports
+# confirm: internal/db imports internal/ingest only
+```
