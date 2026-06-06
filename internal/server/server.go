@@ -54,10 +54,10 @@ type Server struct {
 // is no session history. Returned as a function to satisfy gochecknoglobals.
 func defaultSuggestedQuestions() []string {
 	return []string{
-		"What is Anthony's experience with Kubernetes and GKE?",
-		"How has Anthony approached platform reliability at scale?",
-		"What does Anthony's incident management background look like?",
-		"What SRE practices has Anthony championed in past roles?",
+		"What was Anthony's biggest reliability win at a previous company?",
+		"How does Anthony approach on-call culture and incident response?",
+		"What infrastructure tooling and cloud platforms has Anthony used?",
+		"How has Anthony built or grown SRE teams and practices?",
 	}
 }
 

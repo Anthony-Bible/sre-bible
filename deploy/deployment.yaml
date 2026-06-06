@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sre-bible
+  namespace: sre-bible
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: sre-bible
+  template:
+    metadata:
+      labels:
+        app: sre-bible
+    spec:
+      serviceAccountName: sre-bible
+      terminationGracePeriodSeconds: 40
+      initContainers:
+        - name: cloud-sql-proxy
+          image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.22.0
+          restartPolicy: Always
+          args:
+            - "--structured-logs"
+            - "--port=5432"
+            # Replace with output of: terraform output instance_connection_name
+            - "INSTANCE_CONNECTION_NAME_PLACEHOLDER"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          securityContext:
+            runAsNonRoot: true
+      containers:
+        - name: sre-bible
+          image: ghcr.io/anthony-bible/sre-bible@sha256:PLACEHOLDER_DIGEST_TO_BE_REPLACED_BY_CI
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: LISTEN_ADDR
+              value: ":8080"
+            - name: LOG_FORMAT
+              value: "json"
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sre-bible-secrets
+                  key: ANTHROPIC_API_KEY
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sre-bible-secrets
+                  key: GEMINI_API_KEY
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: sre-bible-secrets
+                  key: DATABASE_URL
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 10m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true

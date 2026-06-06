@@ -1,0 +1,6 @@
+# Copy to terraform.tfvars and fill in any overrides.
+# Default values in variables.tf are production-ready; only override if needed.
+
+# project_id = "gen-lang-client-0479899208"
+# region     = "us-central1"
+# db_tier    = "db-f1-micro"

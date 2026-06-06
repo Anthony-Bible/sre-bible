@@ -1,0 +1,9 @@
+.git
+bin/
+*.test
+query
+ingest.test
+plans/
+docs/
+deploy/
+.claude/

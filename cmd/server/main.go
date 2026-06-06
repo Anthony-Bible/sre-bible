@@ -2,11 +2,16 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Anthony-Bible/sre-bible/internal/db"
 	"github.com/Anthony-Bible/sre-bible/internal/gemini"
@@ -19,10 +24,17 @@ import (
 var (
 	_ server.SessionRepository = (*db.SessionStore)(nil)
 	_ server.Answerer          = (*rag.Pipeline)(nil)
+	_ server.Pinger            = (*pgxpool.Pool)(nil)
 )
 
 func main() {
-	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	var handler slog.Handler
+	if os.Getenv("LOG_FORMAT") == "json" {
+		handler = slog.NewJSONHandler(os.Stderr, nil)
+	} else {
+		handler = slog.NewTextHandler(os.Stderr, nil)
+	}
+	log := slog.New(handler)
 
 	if err := run(log); err != nil {
 		log.Error("fatal", slog.Any("err", err))
@@ -56,7 +68,8 @@ func run(log *slog.Logger) error {
 		addr = ":8080"
 	}
 
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	pool, err := db.NewPool(ctx, dbURL, log)
 	if err != nil {
@@ -94,5 +107,26 @@ func run(log *slog.Logger) error {
 	}
 
 	log.Info("server listening", slog.String("addr", addr))
-	return httpSrv.ListenAndServe()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- httpSrv.ListenAndServe()
+	}()
+
+	select {
+	case err := <-errCh:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	case <-ctx.Done():
+		stop()
+		log.Info("shutting down", slog.String("reason", ctx.Err().Error()))
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+			return fmt.Errorf("shutdown: %w", err)
+		}
+		return nil
+	}
 }

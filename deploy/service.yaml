@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: sre-bible
+  namespace: sre-bible
+spec:
+  selector:
+    app: sre-bible
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
