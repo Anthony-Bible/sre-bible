@@ -70,48 +70,41 @@ func TestChunk_OverlapBetweenConsecutiveChunks(t *testing.T) {
 		t.Fatalf("expected at least 2 chunks, got %d — cannot verify overlap", len(chunks))
 	}
 
-	// Tolerance: overlap must be within ±50 chars of chunkOverlap (200).
-	const toleranceLow = chunkOverlap - 50  // 150
-	const toleranceHigh = chunkOverlap + 50 // 250
-
 	for i := range len(chunks) - 1 {
-		current := chunks[i]
-		next := chunks[i+1]
-
-		// The tail of current should be the prefix of next.
-		// We probe overlap lengths from toleranceLow to toleranceHigh and
-		// accept any that match exactly.
-		found := false
-		for ovl := toleranceLow; ovl <= toleranceHigh; ovl++ {
-			if ovl > len(current) || ovl > len(next) {
-				continue
-			}
-			tail := current[len(current)-ovl:]
-			if strings.HasPrefix(next, tail) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			// Compute what the actual overlap is for the error message.
-			actual := 0
-			maxCheck := len(current)
-			if len(next) < maxCheck {
-				maxCheck = len(next)
-			}
-			for ovl := maxCheck; ovl > 0; ovl-- {
-				tail := current[len(current)-ovl:]
-				if strings.HasPrefix(next, tail) {
-					actual = ovl
-					break
-				}
-			}
+		if !overlapInRange(chunks[i], chunks[i+1], chunkOverlap-50, chunkOverlap+50) {
+			actual := measureOverlap(chunks[i], chunks[i+1])
 			t.Errorf(
 				"chunks[%d] and chunks[%d]: overlap is %d chars, want %d±50",
 				i, i+1, actual, chunkOverlap,
 			)
 		}
 	}
+}
+
+// overlapInRange reports whether any overlap length in [lo, hi] makes the tail
+// of current equal the prefix of next.
+func overlapInRange(current, next string, lo, hi int) bool {
+	for ovl := lo; ovl <= hi; ovl++ {
+		if ovl > len(current) || ovl > len(next) {
+			continue
+		}
+		if strings.HasPrefix(next, current[len(current)-ovl:]) {
+			return true
+		}
+	}
+	return false
+}
+
+// measureOverlap returns the actual number of chars shared between the tail of
+// current and the prefix of next.
+func measureOverlap(current, next string) int {
+	limit := min(len(current), len(next))
+	for ovl := limit; ovl > 0; ovl-- {
+		if strings.HasPrefix(next, current[len(current)-ovl:]) {
+			return ovl
+		}
+	}
+	return 0
 }
 
 // -----------------------------------------------------------------------
@@ -269,13 +262,14 @@ func TestChunk_ParagraphBoundaryPreferredOverWordBoundary(t *testing.T) {
 	// and the second paragraph would push past it. The split must land at
 	// the paragraph boundary, not in the middle of the second paragraph.
 
-	// First paragraph: 800 chars (under chunkTarget of 1000).
-	firstPara := makeText(800)
-	// Second paragraph: 600 chars — when appended, total is 1402 chars
-	// (800 + 2 for "\n\n" + 600), which exceeds both target and hard cap.
-	// So a split must occur. The only valid split point before or at
-	// chunkHardCap that aligns with a paragraph boundary is at position 800.
-	secondPara := makeText(600)
+	// Use distinct sentinel text for each paragraph so substring checks are
+	// unambiguous — repeated lorem ipsum produces identical substrings across
+	// both paragraphs, making containment checks unreliable.
+	firstPara := strings.Repeat("alpha ", 800/6)  // ~800 chars of "alpha alpha …"
+	secondPara := strings.Repeat("bravo ", 600/6) // ~600 chars of "bravo bravo …"
+	// Pad to exact target lengths so the total exceeds hardCap.
+	firstPara = (firstPara + strings.Repeat("alpha ", 200))[:800]
+	secondPara = (secondPara + strings.Repeat("bravo ", 200))[:600]
 	input := firstPara + "\n\n" + secondPara
 
 	chunks := Chunk(input)
@@ -297,14 +291,15 @@ func TestChunk_ParagraphBoundaryPreferredOverWordBoundary(t *testing.T) {
 	}
 
 	// The first chunk must end with the tail of firstPara, not mid-word
-	// in the middle of secondPara's content. We check that the chunk ends
-	// at the paragraph boundary by verifying it does not contain a sequence
-	// from deep within the second paragraph.
+	// in the middle of secondPara's content. Because paragraphs use distinct
+	// sentinel words ("alpha" vs "bravo"), any "bravo" token in the first
+	// chunk means the split crossed the paragraph boundary.
 	deepInSecondPara := secondPara[200:300]
 	if strings.Contains(firstChunk, deepInSecondPara) {
 		t.Errorf(
-			"first chunk crossed the paragraph boundary and contains content from deep within the second paragraph; " +
-				"expected split at \\n\\n boundary, not mid-paragraph",
+			"first chunk crossed the paragraph boundary and contains content from deep within the second paragraph; "+
+				"expected split at \\n\\n boundary, not mid-paragraph; first chunk ends: %q",
+			firstChunk[max(0, len(firstChunk)-80):],
 		)
 	}
 
@@ -317,11 +312,4 @@ func TestChunk_ParagraphBoundaryPreferredOverWordBoundary(t *testing.T) {
 			secondChunk[:min(80, len(secondChunk))],
 		)
 	}
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
