@@ -46,4 +46,5 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Report digest
-        run: echo "Image digest: ${{ steps.push.outputs.digest }}" >> $GITHUB_STEP_SUMMARY
+        run: |
+          echo "Image digest: ${{ steps.push.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
