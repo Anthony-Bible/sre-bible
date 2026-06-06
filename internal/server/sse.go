@@ -18,6 +18,10 @@ type errorPayload struct {
 	Msg string `json:"msg"`
 }
 
+type statusPayload struct {
+	Msg string `json:"msg"`
+}
+
 // writeSSE writes "event: <name>\ndata: <json>\n\n" and flushes.
 func writeSSE(w http.ResponseWriter, f http.Flusher, event string, payload any) error {
 	data, err := json.Marshal(payload)
@@ -48,4 +52,11 @@ func sseDone(w http.ResponseWriter, f http.Flusher, citations []string) error {
 // sseError sends an error event to the client.
 func sseError(w http.ResponseWriter, f http.Flusher, msg string) error {
 	return writeSSE(w, f, "error", errorPayload{Msg: msg})
+}
+
+// sseStatus sends a transient status message to the client.
+// Status messages are informational (e.g. "Reading resume.pdf…") and are not
+// persisted to session history.
+func sseStatus(w http.ResponseWriter, f http.Flusher, msg string) error {
+	return writeSSE(w, f, "status", statusPayload{Msg: msg})
 }

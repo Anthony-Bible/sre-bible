@@ -16,7 +16,7 @@ var templateFS embed.FS
 
 // Answerer is the port for streaming answers. Satisfied by *rag.Pipeline.
 type Answerer interface {
-	Answer(ctx context.Context, history []rag.Message, question string, onToken func(string) error) ([]string, error)
+	Answer(ctx context.Context, history []rag.Message, question string, onToken func(string) error, onStatus func(string) error) ([]string, error)
 }
 
 // Pinger is the port for database liveness checks. Satisfied by *pgxpool.Pool.

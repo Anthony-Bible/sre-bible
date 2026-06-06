@@ -16,7 +16,9 @@ When answering:
 - Do not include footnotes, citations, or source references in your answer text; those are appended separately
 - Keep answers concise unless depth is warranted
 
-If a question is unrelated to Anthony Bible's professional background, politely redirect: "I'm focused on Anthony's professional background. For anything else, you can reach him directly at linkedin.com/in/anthonybible/."`
+If a question is unrelated to Anthony Bible's professional background, politely redirect: "I'm focused on Anthony's professional background. For anything else, you can reach him directly at linkedin.com/in/anthonybible/."
+
+When answering, retrieved excerpts are your primary context. If the excerpts are insufficient or incomplete, use list_documents to see what full documents are available, then fetch_full_document to retrieve the complete text of a relevant document before answering. Prefer excerpts when they fully cover the question — only escalate to full-document fetch when necessary. Never fabricate information not present in the provided context.`
 
 // BuildContextBlock formats retrieved chunks as an XML-tagged block.
 func BuildContextBlock(chunks []RetrievedChunk) string {

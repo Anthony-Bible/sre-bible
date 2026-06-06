@@ -14,9 +14,11 @@ import (
 
 // compile-time interface assertions (gemini and llm don't import rag themselves).
 var (
-	_ rag.QueryEmbedder = (*gemini.Client)(nil)
-	_ rag.ChunkSearcher = (*db.SourceStore)(nil)
-	_ rag.Generator     = (*llm.Client)(nil)
+	_ rag.QueryEmbedder   = (*gemini.Client)(nil)
+	_ rag.ChunkSearcher   = (*db.SourceStore)(nil)
+	_ rag.Generator       = (*llm.Client)(nil)
+	_ rag.DocumentLister  = (*db.SourceStore)(nil)
+	_ rag.FullTextFetcher = (*db.SourceStore)(nil)
 )
 
 func main() {
@@ -62,12 +64,17 @@ func run(log *slog.Logger) error {
 
 	store := db.NewSourceStore(pool, log)
 	llmCli := llm.NewClient(anthropicKey, "claude-haiku-4-5", rag.SystemPrompt, log)
-	pipe := rag.NewPipeline(gemCli, store, llmCli, 0, log)
+	pipe := rag.NewPipeline(gemCli, store, llmCli, store, store, 0, log)
+
+	onStatus := func(msg string) error {
+		_, err := fmt.Fprintf(os.Stderr, "[%s]\n", msg)
+		return err
+	}
 
 	citations, err := pipe.Answer(ctx, nil, question, func(tok string) error {
 		_, werr := fmt.Fprint(os.Stdout, tok)
 		return werr
-	})
+	}, onStatus)
 	if err != nil {
 		return fmt.Errorf("answer: %w", err)
 	}

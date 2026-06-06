@@ -73,7 +73,7 @@ func (p *Pipeline) Run(ctx context.Context, location string) error {
 		}
 	}
 
-	src := Source{Name: name, Type: srcType, Location: location}
+	src := Source{Name: name, Type: srcType, Location: location, FullText: text}
 	if err := p.store.ReplaceSource(ctx, src, chunks); err != nil {
 		return fmt.Errorf("store source %s: %w", name, err)
 	}
