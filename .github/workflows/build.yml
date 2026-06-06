@@ -55,6 +55,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: [determine_version, build]
     if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
     env:
       VERSION: ${{ needs.determine_version.outputs.version }}
       IMAGE_DIGEST: ${{ needs.build.outputs.image_digest }}
@@ -72,5 +74,5 @@ jobs:
       - name: Push manifest
         uses: ad-m/github-push-action@master
         with:
-          github_token: ${{ secrets.PUSH_SECRET }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           branch: main
