@@ -43,13 +43,13 @@ func NewClient(apiKey, model, systemPrompt string, log *slog.Logger) *Client {
 // when the model calls list_documents or fetch_full_document. Aborts if onToken
 // returns an error.
 func (c *Client) StreamAnswer(ctx context.Context, messages []rag.Message, tools rag.ToolSet, onToken func(string) error, onStatus func(string) error) error {
-	params := make([]anthropic.MessageParam, len(messages))
-	for i, m := range messages {
+	params := make([]anthropic.MessageParam, 0, len(messages)+2*maxToolRounds)
+	for _, m := range messages {
 		switch m.Role {
 		case rag.RoleUser:
-			params[i] = anthropic.NewUserMessage(anthropic.NewTextBlock(m.Content))
+			params = append(params, anthropic.NewUserMessage(anthropic.NewTextBlock(m.Content)))
 		case rag.RoleAssistant:
-			params[i] = anthropic.NewAssistantMessage(anthropic.NewTextBlock(m.Content))
+			params = append(params, anthropic.NewAssistantMessage(anthropic.NewTextBlock(m.Content)))
 		}
 	}
 
@@ -70,24 +70,9 @@ func (c *Client) StreamAnswer(ctx context.Context, messages []rag.Message, tools
 			}
 		}
 
-		stream := c.inner.Messages.NewStreaming(ctx, reqParams)
-
-		var acc anthropic.Message
-		for stream.Next() {
-			event := stream.Current()
-			if err := acc.Accumulate(event); err != nil {
-				return fmt.Errorf("accumulate stream event: %w", err)
-			}
-			if delta, ok := event.AsAny().(anthropic.ContentBlockDeltaEvent); ok {
-				if text := delta.Delta.AsTextDelta(); text.Text != "" {
-					if err := onToken(text.Text); err != nil {
-						return err
-					}
-				}
-			}
-		}
-		if err := stream.Err(); err != nil {
-			return fmt.Errorf("stream answer: %w", err)
+		acc, err := c.streamOnce(ctx, reqParams, onToken)
+		if err != nil {
+			return err
 		}
 
 		params = append(params, acc.ToParam())
@@ -97,17 +82,7 @@ func (c *Client) StreamAnswer(ctx context.Context, messages []rag.Message, tools
 			return nil
 		}
 
-		// Execute every tool_use block; the API requires a result for each.
-		var toolResults []anthropic.ContentBlockParamUnion
-		for _, cb := range acc.Content {
-			if cb.Type != "tool_use" {
-				continue
-			}
-			tu := cb.AsToolUse()
-			c.log.InfoContext(ctx, "tool use", "tool", tu.Name, "round", round+1)
-			text, isErr := c.runTool(ctx, tu, tools, onStatus)
-			toolResults = append(toolResults, anthropic.NewToolResultBlock(tu.ID, text, isErr))
-		}
+		toolResults := c.collectToolResults(ctx, round, acc, tools, onStatus)
 		if len(toolResults) > 0 {
 			params = append(params, anthropic.NewUserMessage(toolResults...))
 		}
@@ -117,9 +92,47 @@ func (c *Client) StreamAnswer(ctx context.Context, messages []rag.Message, tools
 	return nil
 }
 
+// streamOnce runs a single streaming API call and returns the accumulated message.
+func (c *Client) streamOnce(ctx context.Context, reqParams anthropic.MessageNewParams, onToken func(string) error) (anthropic.Message, error) {
+	stream := c.inner.Messages.NewStreaming(ctx, reqParams)
+	var acc anthropic.Message
+	for stream.Next() {
+		event := stream.Current()
+		if err := acc.Accumulate(event); err != nil {
+			return acc, fmt.Errorf("accumulate stream event: %w", err)
+		}
+		if delta, ok := event.AsAny().(anthropic.ContentBlockDeltaEvent); ok {
+			if text := delta.Delta.AsTextDelta(); text.Text != "" {
+				if err := onToken(text.Text); err != nil {
+					return acc, err
+				}
+			}
+		}
+	}
+	if err := stream.Err(); err != nil {
+		return acc, fmt.Errorf("stream answer: %w", err)
+	}
+	return acc, nil
+}
+
+// collectToolResults executes every tool_use block in acc and returns one result per block.
+func (c *Client) collectToolResults(ctx context.Context, round int, acc anthropic.Message, tools rag.ToolSet, onStatus func(string) error) []anthropic.ContentBlockParamUnion {
+	var results []anthropic.ContentBlockParamUnion
+	for _, cb := range acc.Content {
+		if cb.Type != "tool_use" {
+			continue
+		}
+		tu := cb.AsToolUse()
+		c.log.InfoContext(ctx, "tool use", "tool", tu.Name, "round", round+1)
+		text, isErr := c.runTool(ctx, tu, tools, onStatus)
+		results = append(results, anthropic.NewToolResultBlock(tu.ID, text, isErr))
+	}
+	return results
+}
+
 // buildToolParams returns tool definitions for whichever ToolSet fields are non-nil.
 func buildToolParams(tools rag.ToolSet) []anthropic.ToolUnionParam {
-	var result []anthropic.ToolUnionParam
+	result := make([]anthropic.ToolUnionParam, 0, 2)
 
 	if tools.Lister != nil {
 		t := anthropic.ToolParam{
@@ -154,11 +167,12 @@ func buildToolParams(tools rag.ToolSet) []anthropic.ToolUnionParam {
 
 // runTool dispatches a tool_use block and returns the result text and whether it is an error.
 func (c *Client) runTool(ctx context.Context, tu anthropic.ToolUseBlock, tools rag.ToolSet, onStatus func(string) error) (string, bool) {
+	if onStatus == nil {
+		onStatus = func(string) error { return nil }
+	}
 	switch tu.Name {
 	case "list_documents":
-		if onStatus != nil {
-			_ = onStatus("Listing available documents…")
-		}
+		_ = onStatus("Listing available documents…")
 		docs, err := tools.Lister.ListSources(ctx)
 		if err != nil {
 			return fmt.Sprintf("error listing documents: %v", err), true
@@ -176,9 +190,7 @@ func (c *Client) runTool(ctx context.Context, tu anthropic.ToolUseBlock, tools r
 		if err := json.Unmarshal(tu.Input, &input); err != nil {
 			return fmt.Sprintf("invalid fetch_full_document arguments: %v", err), true
 		}
-		if onStatus != nil {
-			_ = onStatus(fmt.Sprintf("Reading %s…", input.SourceName))
-		}
+		_ = onStatus(fmt.Sprintf("Reading %s…", input.SourceName))
 		text, found, err := tools.Fetcher.GetFullText(ctx, input.SourceName)
 		if err != nil {
 			return fmt.Sprintf("error fetching document: %v", err), true

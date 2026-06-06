@@ -150,25 +150,19 @@ func (s *SourceStore) ListSources(ctx context.Context) ([]rag.DocumentInfo, erro
 	if err != nil {
 		return nil, fmt.Errorf("list sources: %w", err)
 	}
-	defer rows.Close()
-
-	var docs []rag.DocumentInfo
-	for rows.Next() {
+	docs, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (rag.DocumentInfo, error) {
 		var d rag.DocumentInfo
-		if err := rows.Scan(&d.Name, &d.Type); err != nil {
-			return nil, fmt.Errorf("scan source: %w", err)
-		}
-		docs = append(docs, d)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list sources rows: %w", err)
+		return d, row.Scan(&d.Name, &d.Type)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list sources: %w", err)
 	}
 	return docs, nil
 }
 
 // GetFullText returns the stored full text for the named source.
 // found is false when the source does not exist or has no stored full text (NULL).
-func (s *SourceStore) GetFullText(ctx context.Context, name string) (text string, found bool, err error) {
+func (s *SourceStore) GetFullText(ctx context.Context, name string) (string, bool, error) {
 	var ft *string
 	qErr := s.pool.QueryRow(ctx,
 		`SELECT full_text FROM sources WHERE name = $1`, name,
