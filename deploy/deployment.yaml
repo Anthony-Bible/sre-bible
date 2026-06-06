@@ -22,8 +22,7 @@ spec:
           args:
             - "--structured-logs"
             - "--port=5432"
-            # Replace with output of: terraform output instance_connection_name
-            - "INSTANCE_CONNECTION_NAME_PLACEHOLDER"
+            - "gen-lang-client-0479899208:us-central1:sre-bible"
           resources:
             requests:
               cpu: 10m
@@ -35,7 +34,7 @@ spec:
             runAsNonRoot: true
       containers:
         - name: sre-bible
-          image: ghcr.io/anthony-bible/sre-bible@sha256:PLACEHOLDER_DIGEST_TO_BE_REPLACED_BY_CI
+          image: ghcr.io/anthony-bible/sre-bible@%{IMAGE_SHA}
           ports:
             - name: http
               containerPort: 8080
