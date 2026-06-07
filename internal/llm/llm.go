@@ -170,7 +170,7 @@ func buildToolParams(tools rag.ToolSet) []anthropic.ToolUnionParam {
 	if tools.Lister != nil {
 		t := anthropic.ToolParam{
 			Name:        toolListDocuments,
-			Description: anthropic.String("List all available documents in the knowledge base. Returns document names and types. Call this before fetch_full_document to discover valid names."),
+			Description: anthropic.String("List all available documents in the knowledge base. Returns document names, types, and a short description of each document's contents. Call this before fetch_full_document to discover valid names and choose the right document."),
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Properties: map[string]any{},
 			},
@@ -235,63 +235,76 @@ func (c *Client) runTool(ctx context.Context, tu anthropic.ToolUseBlock, tools r
 	}
 	switch tu.Name {
 	case toolListDocuments:
-		_ = onStatus("Listing available documents…")
-		docs, err := tools.Lister.ListSources(ctx)
-		if err != nil {
-			return fmt.Sprintf("error listing documents: %v", err), true, ""
-		}
-		var sb strings.Builder
-		for _, d := range docs {
-			fmt.Fprintf(&sb, "%s (%s)\n", d.Name, d.Type)
-		}
-		return sb.String(), false, ""
-
+		return c.runListDocuments(ctx, tools, onStatus)
 	case toolFetchFullDocument:
-		var input struct {
-			SourceName string `json:"source_name"`
-		}
-		if err := json.Unmarshal(tu.Input, &input); err != nil {
-			return fmt.Sprintf("invalid fetch_full_document arguments: %v", err), true, ""
-		}
-		_ = onStatus(fmt.Sprintf("Reading %s…", input.SourceName))
-		text, found, err := tools.Fetcher.GetFullText(ctx, input.SourceName)
-		if err != nil {
-			return fmt.Sprintf("error fetching document: %v", err), true, ""
-		}
-		if !found {
-			return fmt.Sprintf("No document named %q is available (or it has no stored full text). Use list_documents to see valid names.", input.SourceName), false, ""
-		}
-		return text, false, input.SourceName
-
+		return c.runFetchFullDocument(ctx, tu.Input, tools, onStatus)
 	case toolSendContactEmail:
-		var input struct {
-			SenderName     string `json:"sender_name"`
-			SenderEmail    string `json:"sender_email"`
-			Message        string `json:"message"`
-			ConfirmedDraft bool   `json:"confirmed_draft"`
-		}
-		if err := json.Unmarshal(tu.Input, &input); err != nil {
-			return fmt.Sprintf("invalid send_contact_email arguments: %v", err), true, ""
-		}
-		if !input.ConfirmedDraft {
-			return "You must show the visitor a draft of the email and get their explicit confirmation before sending. Please present the draft and ask the visitor to confirm.", true, ""
-		}
-		_ = onStatus("Sending your message to Anthony…")
-		ok, reason, err := tools.Emailer.SendContactEmail(ctx, email.ContactEmail{
-			SenderName:  input.SenderName,
-			SenderEmail: input.SenderEmail,
-			Message:     input.Message,
-		})
-		if err != nil {
-			c.log.ErrorContext(ctx, "send contact email", slog.Any("err", err))
-			return "The email could not be sent due to an internal error. Apologize briefly to the visitor and suggest they reach Anthony at linkedin.com/in/anthonybible/ instead.", true, ""
-		}
-		if !ok {
-			return reason, true, ""
-		}
-		return "Your message was sent to Anthony successfully. Confirm this to the visitor.", false, ""
-
+		return c.runSendContactEmail(ctx, tu.Input, tools, onStatus)
 	default:
 		return fmt.Sprintf("unknown tool: %s", tu.Name), true, ""
 	}
+}
+
+func (c *Client) runListDocuments(ctx context.Context, tools rag.ToolSet, onStatus func(string) error) (string, bool, string) {
+	_ = onStatus("Listing available documents…")
+	docs, err := tools.Lister.ListSources(ctx)
+	if err != nil {
+		return fmt.Sprintf("error listing documents: %v", err), true, ""
+	}
+	if len(docs) == 0 {
+		return "No documents are available in the knowledge base.", false, ""
+	}
+	var sb strings.Builder
+	for _, d := range docs {
+		sb.WriteString(d.String())
+		sb.WriteByte('\n')
+	}
+	return sb.String(), false, ""
+}
+
+func (c *Client) runFetchFullDocument(ctx context.Context, rawInput json.RawMessage, tools rag.ToolSet, onStatus func(string) error) (string, bool, string) {
+	var input struct {
+		SourceName string `json:"source_name"`
+	}
+	if err := json.Unmarshal(rawInput, &input); err != nil {
+		return fmt.Sprintf("invalid fetch_full_document arguments: %v", err), true, ""
+	}
+	_ = onStatus(fmt.Sprintf("Reading %s…", input.SourceName))
+	text, found, err := tools.Fetcher.GetFullText(ctx, input.SourceName)
+	if err != nil {
+		return fmt.Sprintf("error fetching document: %v", err), true, ""
+	}
+	if !found {
+		return fmt.Sprintf("No document named %q is available (or it has no stored full text). Use list_documents to see valid names.", input.SourceName), false, ""
+	}
+	return text, false, input.SourceName
+}
+
+func (c *Client) runSendContactEmail(ctx context.Context, rawInput json.RawMessage, tools rag.ToolSet, onStatus func(string) error) (string, bool, string) {
+	var input struct {
+		SenderName     string `json:"sender_name"`
+		SenderEmail    string `json:"sender_email"`
+		Message        string `json:"message"`
+		ConfirmedDraft bool   `json:"confirmed_draft"`
+	}
+	if err := json.Unmarshal(rawInput, &input); err != nil {
+		return fmt.Sprintf("invalid send_contact_email arguments: %v", err), true, ""
+	}
+	if !input.ConfirmedDraft {
+		return "You must show the visitor a draft of the email and get their explicit confirmation before sending. Please present the draft and ask the visitor to confirm.", true, ""
+	}
+	_ = onStatus("Sending your message to Anthony…")
+	ok, reason, err := tools.Emailer.SendContactEmail(ctx, email.ContactEmail{
+		SenderName:  input.SenderName,
+		SenderEmail: input.SenderEmail,
+		Message:     input.Message,
+	})
+	if err != nil {
+		c.log.ErrorContext(ctx, "send contact email", slog.Any("err", err))
+		return "The email could not be sent due to an internal error. Apologize briefly to the visitor and suggest they reach Anthony at linkedin.com/in/anthonybible/ instead.", true, ""
+	}
+	if !ok {
+		return reason, true, ""
+	}
+	return "Your message was sent to Anthony successfully. Confirm this to the visitor.", false, ""
 }

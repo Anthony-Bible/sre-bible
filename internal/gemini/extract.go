@@ -21,16 +21,12 @@ func (c *Client) ExtractPDFText(ctx context.Context, pdfPath string) (string, er
 		return "", fmt.Errorf("read pdf: %w", err)
 	}
 
-	resp, err := c.inner.Models.GenerateContent(ctx, extractionModel,
-		[]*genai.Content{
-			genai.NewContentFromParts([]*genai.Part{
-				genai.NewPartFromBytes(data, "application/pdf"),
-				genai.NewPartFromText(extractionPrompt),
-			}, genai.RoleUser),
-		}, nil)
+	text, err := c.generateContent(ctx, extractionModel, []*genai.Part{
+		genai.NewPartFromBytes(data, "application/pdf"),
+		genai.NewPartFromText(extractionPrompt),
+	})
 	if err != nil {
 		return "", fmt.Errorf("generate content: %w", err)
 	}
-
-	return resp.Text(), nil
+	return text, nil
 }

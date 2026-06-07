@@ -41,6 +41,9 @@ A footnote-style source attribution displayed at the bottom of each Resume Agent
 ### Message
 A single conversational turn within a Session. Each Message has a role (`user` or `assistant`) and a text content. User Messages contain the Viewer's question. Assistant Messages contain the Resume Agent's response. Messages are persisted to Cloud SQL and are visible to the Owner for analytics.
 
+### Description
+A short LLM-generated summary (1–2 sentences, ≤ ~40 words) of a Source's contents, stored in the `sources.description` column at ingestion time. Produced by `gemini-3.1-flash-lite` during ingest from the full extracted text. Surfaced by the `list_documents` tool as `name (type): description` so the Resume Agent can route to the right document without always fetching full text. Nullable: legacy rows ingested before this column existed have `description = NULL` and degrade gracefully (the description suffix is omitted in `list_documents` output).
+
 ### Full Text
 The complete Gemini-extracted markdown of a Source, stored in the `sources.full_text` column at ingestion time. Used by the Resume Agent when retrieved Chunks are insufficient to answer a question — see Tool and Escalation. Nullable: legacy rows ingested before this column existed have `full_text = NULL` and degrade gracefully.
 

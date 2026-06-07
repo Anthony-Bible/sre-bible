@@ -75,21 +75,26 @@ func (s *SourceStore) ReplaceSource(ctx context.Context, src ingest.Source, chun
 
 func upsertSource(ctx context.Context, tx pgx.Tx, src ingest.Source) (int64, error) {
 	var id int64
-	// Store full_text as NULL when empty so legacy rows and new empty-text rows are uniform.
+	// Store full_text/description as NULL when empty so legacy rows and new empty rows are uniform.
 	var fullText *string
 	if src.FullText != "" {
 		fullText = &src.FullText
 	}
+	var description *string
+	if src.Description != "" {
+		description = &src.Description
+	}
 	err := tx.QueryRow(ctx, `
-		INSERT INTO sources (name, type, location, full_text, updated_at)
-		VALUES ($1, $2, $3, $4, now())
+		INSERT INTO sources (name, type, location, full_text, description, updated_at)
+		VALUES ($1, $2, $3, $4, $5, now())
 		ON CONFLICT (name) DO UPDATE
-		  SET type       = EXCLUDED.type,
-		      location   = EXCLUDED.location,
-		      full_text  = EXCLUDED.full_text,
-		      updated_at = now()
+		  SET type        = EXCLUDED.type,
+		      location    = EXCLUDED.location,
+		      full_text   = EXCLUDED.full_text,
+		      description = EXCLUDED.description,
+		      updated_at  = now()
 		RETURNING id`,
-		src.Name, src.Type, src.Location, fullText,
+		src.Name, src.Type, src.Location, fullText, description,
 	).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("upsert source: %w", err)
@@ -144,15 +149,22 @@ func (s *SourceStore) SearchChunks(ctx context.Context, queryEmbedding []float32
 	return results, nil
 }
 
-// ListSources returns the name and type of every source, ordered by name.
+// ListSources returns the name, type, and description of every source, ordered by name.
 func (s *SourceStore) ListSources(ctx context.Context) ([]rag.DocumentInfo, error) {
-	rows, err := s.pool.Query(ctx, `SELECT name, type FROM sources ORDER BY name`)
+	rows, err := s.pool.Query(ctx, `SELECT name, type, description FROM sources ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("list sources: %w", err)
 	}
 	docs, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (rag.DocumentInfo, error) {
 		var d rag.DocumentInfo
-		return d, row.Scan(&d.Name, &d.Type)
+		var desc *string
+		if err := row.Scan(&d.Name, &d.Type, &desc); err != nil {
+			return d, err
+		}
+		if desc != nil {
+			d.Description = *desc
+		}
+		return d, nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list sources: %w", err)

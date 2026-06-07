@@ -197,6 +197,66 @@ func TestRunTool_EmailMalformedJSON(t *testing.T) {
 	}
 }
 
+// --- runTool: list_documents formatting ---
+
+type configuredLister struct {
+	docs []rag.DocumentInfo
+}
+
+func (l configuredLister) ListSources(_ context.Context) ([]rag.DocumentInfo, error) {
+	return l.docs, nil
+}
+
+func TestRunTool_ListDocuments_Formatting(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		docs     []rag.DocumentInfo
+		wantLine string
+	}{
+		{
+			name:     "with description",
+			docs:     []rag.DocumentInfo{{Name: "resume.pdf", Type: "pdf", Description: "Anthony's SRE resume."}},
+			wantLine: "resume.pdf (pdf): Anthony's SRE resume.",
+		},
+		{
+			name:     "without description (legacy NULL)",
+			docs:     []rag.DocumentInfo{{Name: "resume.pdf", Type: "pdf"}},
+			wantLine: "resume.pdf (pdf)",
+		},
+		{
+			name: "mixed: one with, one without",
+			docs: []rag.DocumentInfo{
+				{Name: "a.pdf", Type: "pdf", Description: "Document A."},
+				{Name: "b.url", Type: "url"},
+			},
+			wantLine: "a.pdf (pdf): Document A.\nb.url (url)",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := newTestClient()
+			tools := rag.ToolSet{Lister: configuredLister{docs: tc.docs}}
+			tu := anthropic.ToolUseBlock{ID: "id", Name: toolListDocuments, Input: json.RawMessage(`{}`)}
+
+			text, isErr, sourceName := c.runTool(context.Background(), tu, tools, nil)
+
+			if isErr {
+				t.Errorf("expected isErr=false, got true; text=%q", text)
+			}
+			if sourceName != "" {
+				t.Errorf("sourceName must be empty for list_documents, got %q", sourceName)
+			}
+			got := strings.TrimRight(text, "\n")
+			if got != tc.wantLine {
+				t.Errorf("output:\n  got  %q\n  want %q", got, tc.wantLine)
+			}
+		})
+	}
+}
+
 type testError struct{ msg string }
 
 func (e *testError) Error() string { return e.msg }
