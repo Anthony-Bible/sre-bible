@@ -12,7 +12,8 @@
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
             background: #f0f2f5;
             color: #1a1a2e;
-            height: 100vh;
+            height: 100vh;   /* fallback for browsers without dvh */
+            height: 100dvh;  /* dynamic viewport height — keeps input visible on mobile */
             display: flex;
             flex-direction: column;
             overflow: hidden;
