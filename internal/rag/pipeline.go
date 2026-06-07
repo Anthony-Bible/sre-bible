@@ -45,8 +45,8 @@ func NewPipeline(embedder QueryEmbedder, searcher ChunkSearcher, generator Gener
 //
 // history contains prior turns from the Session (may be empty for first turn).
 // onStatus, if non-nil, receives transient status messages during tool rounds.
-// citations are returned after streaming completes; they are derived from
-// retrieved chunks, not from the model's tool fetches (v1 known limitation).
+// citations include both vector-retrieved chunk sources and any documents fetched
+// via the fetch_full_document tool during generation.
 func (p *Pipeline) Answer(ctx context.Context, history []Message, question string, onToken func(string) error, onStatus func(string) error) ([]string, error) {
 	queryVec, err := p.embedder.EmbedQuery(ctx, question)
 	if err != nil {
@@ -72,16 +72,23 @@ func (p *Pipeline) Answer(ctx context.Context, history []Message, question strin
 	messages[len(history)] = currentMsg
 
 	tools := ToolSet{Lister: p.lister, Fetcher: p.fetcher}
-	if err := p.generator.StreamAnswer(ctx, messages, tools, onToken, onStatus); err != nil {
+	toolFetched, err := p.generator.StreamAnswer(ctx, messages, tools, onToken, onStatus)
+	if err != nil {
 		return nil, err
 	}
 
-	var citations []string
 	seen := make(map[string]struct{})
+	var citations []string
 	for _, c := range chunks {
 		if _, ok := seen[c.SourceName]; !ok {
 			seen[c.SourceName] = struct{}{}
 			citations = append(citations, c.SourceName)
+		}
+	}
+	for _, name := range toolFetched {
+		if _, ok := seen[name]; !ok {
+			seen[name] = struct{}{}
+			citations = append(citations, name)
 		}
 	}
 

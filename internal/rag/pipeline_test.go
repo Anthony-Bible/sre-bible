@@ -31,37 +31,38 @@ type stubGenerator struct {
 	receivedTools rag.ToolSet
 	tokens        []string
 	statusMsgs    []string // status messages to emit via onStatus
+	fetchedNames  []string // tool-fetched source names to return from StreamAnswer
 }
 
-func (g *stubGenerator) StreamAnswer(_ context.Context, messages []rag.Message, tools rag.ToolSet, onToken func(string) error, onStatus func(string) error) error {
+func (g *stubGenerator) StreamAnswer(_ context.Context, messages []rag.Message, tools rag.ToolSet, onToken func(string) error, onStatus func(string) error) ([]string, error) {
 	g.called = true
 	g.received = messages
 	g.receivedTools = tools
 	for _, msg := range g.statusMsgs {
 		if onStatus != nil {
 			if err := onStatus(msg); err != nil {
-				return err
+				return nil, err
 			}
 		}
 	}
 	for _, tok := range g.tokens {
 		if err := onToken(tok); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	return nil
+	return g.fetchedNames, nil
 }
 
 // newPipe is a helper that builds a Pipeline with nil lister/fetcher (no tools).
-func newPipe(embedder rag.QueryEmbedder, searcher rag.ChunkSearcher, gen rag.Generator, k int) *rag.Pipeline {
-	return rag.NewPipeline(embedder, searcher, gen, nil, nil, k, nil)
+func newPipe(searcher rag.ChunkSearcher, gen rag.Generator) *rag.Pipeline {
+	return rag.NewPipeline(stubEmbedder{}, searcher, gen, nil, nil, 0, nil)
 }
 
 func TestPipeline_EmptyChunkGuard(t *testing.T) {
 	t.Parallel()
 
 	gen := &stubGenerator{}
-	pipe := newPipe(stubEmbedder{}, stubSearcher{chunks: nil}, gen, 0)
+	pipe := newPipe(stubSearcher{chunks: nil}, gen)
 
 	var got []string
 	citations, err := pipe.Answer(context.Background(), nil, "anything?", func(tok string) error {
@@ -95,7 +96,7 @@ func TestPipeline_CitationDeduplication(t *testing.T) {
 		{Content: "c3", SourceName: "resume.pdf"}, // duplicate
 	}
 	gen := &stubGenerator{tokens: []string{"answer"}}
-	pipe := newPipe(stubEmbedder{}, stubSearcher{chunks: chunks}, gen, 0)
+	pipe := newPipe(stubSearcher{chunks: chunks}, gen)
 
 	citations, err := pipe.Answer(context.Background(), nil, "q?", func(string) error { return nil }, nil)
 	if err != nil {
@@ -118,7 +119,7 @@ func TestPipeline_HistoryPassedToGenerator(t *testing.T) {
 
 	chunks := []rag.RetrievedChunk{{Content: "ctx", SourceName: "src"}}
 	gen := &stubGenerator{tokens: []string{"ok"}}
-	pipe := newPipe(stubEmbedder{}, stubSearcher{chunks: chunks}, gen, 0)
+	pipe := newPipe(stubSearcher{chunks: chunks}, gen)
 
 	history := []rag.Message{
 		{Role: rag.RoleUser, Content: "previous question"},
@@ -178,7 +179,7 @@ func TestPipeline_OnStatusThreaded(t *testing.T) {
 		tokens:     []string{"ok"},
 		statusMsgs: []string{"Reading resume.pdf…"},
 	}
-	pipe := newPipe(stubEmbedder{}, stubSearcher{chunks: chunks}, gen, 0)
+	pipe := newPipe(stubSearcher{chunks: chunks}, gen)
 
 	var statuses []string
 	_, err := pipe.Answer(context.Background(), nil, "q?", func(string) error { return nil }, func(msg string) error {
@@ -191,6 +192,54 @@ func TestPipeline_OnStatusThreaded(t *testing.T) {
 
 	if len(statuses) != 1 || statuses[0] != "Reading resume.pdf…" {
 		t.Errorf("onStatus messages: got %v, want [Reading resume.pdf…]", statuses)
+	}
+}
+
+func TestPipeline_ToolFetchedDocumentInCitations(t *testing.T) {
+	t.Parallel()
+
+	chunks := []rag.RetrievedChunk{{Content: "ctx", SourceName: "chunks.pdf"}}
+	gen := &stubGenerator{
+		tokens:       []string{"ok"},
+		fetchedNames: []string{"runbook.md"},
+	}
+	pipe := newPipe(stubSearcher{chunks: chunks}, gen)
+
+	citations, err := pipe.Answer(context.Background(), nil, "q?", func(string) error { return nil }, nil)
+	if err != nil {
+		t.Fatalf("Answer: %v", err)
+	}
+
+	// Both the chunk source and the tool-fetched document must appear in citations.
+	wantSet := map[string]bool{"chunks.pdf": true, "runbook.md": true}
+	if len(citations) != len(wantSet) {
+		t.Fatalf("citations: got %v, want %v", citations, []string{"chunks.pdf", "runbook.md"})
+	}
+	for _, c := range citations {
+		if !wantSet[c] {
+			t.Errorf("unexpected citation %q", c)
+		}
+	}
+}
+
+func TestPipeline_ToolFetchedDocumentDeduplicatedWithChunks(t *testing.T) {
+	t.Parallel()
+
+	// Generator returns the same name that was already in chunks — must not duplicate.
+	chunks := []rag.RetrievedChunk{{Content: "ctx", SourceName: "resume.pdf"}}
+	gen := &stubGenerator{
+		tokens:       []string{"ok"},
+		fetchedNames: []string{"resume.pdf"},
+	}
+	pipe := newPipe(stubSearcher{chunks: chunks}, gen)
+
+	citations, err := pipe.Answer(context.Background(), nil, "q?", func(string) error { return nil }, nil)
+	if err != nil {
+		t.Fatalf("Answer: %v", err)
+	}
+
+	if len(citations) != 1 || citations[0] != "resume.pdf" {
+		t.Errorf("citations: got %v, want [resume.pdf]", citations)
 	}
 }
 

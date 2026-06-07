@@ -64,6 +64,8 @@ type ToolSet struct {
 // tools provides document-access capabilities for multi-round tool use.
 // onStatus, if non-nil, is called with transient status messages during tool rounds.
 // If onToken returns an error the stream must abort and that error is returned.
+// The returned []string contains the names of any documents fetched via tool use,
+// so callers can include them in citations alongside vector-retrieved chunks.
 type Generator interface {
-	StreamAnswer(ctx context.Context, messages []Message, tools ToolSet, onToken func(string) error, onStatus func(string) error) error
+	StreamAnswer(ctx context.Context, messages []Message, tools ToolSet, onToken func(string) error, onStatus func(string) error) ([]string, error)
 }

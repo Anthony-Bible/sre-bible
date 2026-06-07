@@ -15,6 +15,11 @@ import (
 
 const maxToolRounds = 5
 
+const (
+	toolListDocuments     = "list_documents"
+	toolFetchFullDocument = "fetch_full_document"
+)
+
 // Client wraps the Anthropic SDK and satisfies rag.Generator.
 type Client struct {
 	inner        *anthropic.Client
@@ -41,8 +46,9 @@ func NewClient(apiKey, model, systemPrompt string, log *slog.Logger) *Client {
 // StreamAnswer implements rag.Generator. Sends systemPrompt + messages to Claude,
 // invoking onToken for each text delta. Runs a tool-use loop (up to maxToolRounds)
 // when the model calls list_documents or fetch_full_document. Aborts if onToken
-// returns an error.
-func (c *Client) StreamAnswer(ctx context.Context, messages []rag.Message, tools rag.ToolSet, onToken func(string) error, onStatus func(string) error) error {
+// returns an error. Returns the names of any documents fetched via fetch_full_document
+// so callers can include them in citations.
+func (c *Client) StreamAnswer(ctx context.Context, messages []rag.Message, tools rag.ToolSet, onToken func(string) error, onStatus func(string) error) ([]string, error) {
 	params := make([]anthropic.MessageParam, 0, len(messages)+2*maxToolRounds)
 	for _, m := range messages {
 		switch m.Role {
@@ -54,6 +60,7 @@ func (c *Client) StreamAnswer(ctx context.Context, messages []rag.Message, tools
 	}
 
 	toolParams := buildToolParams(tools)
+	var fetchedNames []string
 
 	for round := 0; round <= maxToolRounds; round++ {
 		reqParams := anthropic.MessageNewParams{
@@ -72,24 +79,27 @@ func (c *Client) StreamAnswer(ctx context.Context, messages []rag.Message, tools
 
 		acc, err := c.streamOnce(ctx, reqParams, onToken)
 		if err != nil {
-			return err
+			return fetchedNames, err
 		}
 
 		params = append(params, acc.ToParam())
 
 		if acc.StopReason != anthropic.StopReasonToolUse {
 			c.log.InfoContext(ctx, "stream complete", "model", c.model, "rounds", round+1)
-			return nil
+			return fetchedNames, nil
 		}
 
-		toolResults := c.collectToolResults(ctx, round, acc, tools, onStatus)
-		if len(toolResults) > 0 {
-			params = append(params, anthropic.NewUserMessage(toolResults...))
+		toolResults, roundFetched := c.collectToolResults(ctx, round, acc, tools, onStatus)
+		fetchedNames = append(fetchedNames, roundFetched...)
+		if len(toolResults) == 0 {
+			// stop_reason=tool_use but no tool_use blocks — protocol violation; abort.
+			return fetchedNames, fmt.Errorf("stream answer: stop_reason=tool_use but response contains no tool_use blocks")
 		}
+		params = append(params, anthropic.NewUserMessage(toolResults...))
 	}
 
 	c.log.InfoContext(ctx, "stream complete (tool cap hit)", "model", c.model)
-	return nil
+	return fetchedNames, nil
 }
 
 // streamOnce runs a single streaming API call and returns the accumulated message.
@@ -115,19 +125,25 @@ func (c *Client) streamOnce(ctx context.Context, reqParams anthropic.MessageNewP
 	return acc, nil
 }
 
-// collectToolResults executes every tool_use block in acc and returns one result per block.
-func (c *Client) collectToolResults(ctx context.Context, round int, acc anthropic.Message, tools rag.ToolSet, onStatus func(string) error) []anthropic.ContentBlockParamUnion {
+// collectToolResults executes every tool_use block in acc.
+// Returns the tool result blocks to send back to the model and the names of any
+// documents successfully fetched via fetch_full_document (for citation tracking).
+func (c *Client) collectToolResults(ctx context.Context, round int, acc anthropic.Message, tools rag.ToolSet, onStatus func(string) error) ([]anthropic.ContentBlockParamUnion, []string) {
 	var results []anthropic.ContentBlockParamUnion
+	var fetchedNames []string
 	for _, cb := range acc.Content {
 		if cb.Type != "tool_use" {
 			continue
 		}
 		tu := cb.AsToolUse()
 		c.log.InfoContext(ctx, "tool use", "tool", tu.Name, "round", round+1)
-		text, isErr := c.runTool(ctx, tu, tools, onStatus)
+		text, isErr, sourceName := c.runTool(ctx, tu, tools, onStatus)
 		results = append(results, anthropic.NewToolResultBlock(tu.ID, text, isErr))
+		if sourceName != "" {
+			fetchedNames = append(fetchedNames, sourceName)
+		}
 	}
-	return results
+	return results, fetchedNames
 }
 
 // buildToolParams returns tool definitions for whichever ToolSet fields are non-nil.
@@ -136,7 +152,7 @@ func buildToolParams(tools rag.ToolSet) []anthropic.ToolUnionParam {
 
 	if tools.Lister != nil {
 		t := anthropic.ToolParam{
-			Name:        "list_documents",
+			Name:        toolListDocuments,
 			Description: anthropic.String("List all available documents in the knowledge base. Returns document names and types. Call this before fetch_full_document to discover valid names."),
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Properties: map[string]any{},
@@ -147,7 +163,7 @@ func buildToolParams(tools rag.ToolSet) []anthropic.ToolUnionParam {
 
 	if tools.Fetcher != nil {
 		t := anthropic.ToolParam{
-			Name:        "fetch_full_document",
+			Name:        toolFetchFullDocument,
 			Description: anthropic.String("Fetch the complete text of a document from the knowledge base. Use this when retrieved chunks are insufficient to answer the question completely."),
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Properties: map[string]any{
@@ -165,42 +181,43 @@ func buildToolParams(tools rag.ToolSet) []anthropic.ToolUnionParam {
 	return result
 }
 
-// runTool dispatches a tool_use block and returns the result text and whether it is an error.
-func (c *Client) runTool(ctx context.Context, tu anthropic.ToolUseBlock, tools rag.ToolSet, onStatus func(string) error) (string, bool) {
+// runTool dispatches a tool_use block and returns the result text, whether it is an
+// error, and (for successful fetch_full_document calls) the fetched source name.
+func (c *Client) runTool(ctx context.Context, tu anthropic.ToolUseBlock, tools rag.ToolSet, onStatus func(string) error) (string, bool, string) {
 	if onStatus == nil {
 		onStatus = func(string) error { return nil }
 	}
 	switch tu.Name {
-	case "list_documents":
+	case toolListDocuments:
 		_ = onStatus("Listing available documents…")
 		docs, err := tools.Lister.ListSources(ctx)
 		if err != nil {
-			return fmt.Sprintf("error listing documents: %v", err), true
+			return fmt.Sprintf("error listing documents: %v", err), true, ""
 		}
 		var sb strings.Builder
 		for _, d := range docs {
 			fmt.Fprintf(&sb, "%s (%s)\n", d.Name, d.Type)
 		}
-		return sb.String(), false
+		return sb.String(), false, ""
 
-	case "fetch_full_document":
+	case toolFetchFullDocument:
 		var input struct {
 			SourceName string `json:"source_name"`
 		}
 		if err := json.Unmarshal(tu.Input, &input); err != nil {
-			return fmt.Sprintf("invalid fetch_full_document arguments: %v", err), true
+			return fmt.Sprintf("invalid fetch_full_document arguments: %v", err), true, ""
 		}
 		_ = onStatus(fmt.Sprintf("Reading %s…", input.SourceName))
 		text, found, err := tools.Fetcher.GetFullText(ctx, input.SourceName)
 		if err != nil {
-			return fmt.Sprintf("error fetching document: %v", err), true
+			return fmt.Sprintf("error fetching document: %v", err), true, ""
 		}
 		if !found {
-			return fmt.Sprintf("No document named %q is available (or it has no stored full text). Use list_documents to see valid names.", input.SourceName), false
+			return fmt.Sprintf("No document named %q is available (or it has no stored full text). Use list_documents to see valid names.", input.SourceName), false, ""
 		}
-		return text, false
+		return text, false, input.SourceName
 
 	default:
-		return fmt.Sprintf("unknown tool: %s", tu.Name), true
+		return fmt.Sprintf("unknown tool: %s", tu.Name), true, ""
 	}
 }
