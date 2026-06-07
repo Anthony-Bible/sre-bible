@@ -8,6 +8,7 @@ type Source struct {
 	Name     string
 	Type     string
 	Location string
+	FullText string // complete extracted text; empty for legacy rows
 }
 
 // Chunk is a contiguous text segment with its vector embedding.

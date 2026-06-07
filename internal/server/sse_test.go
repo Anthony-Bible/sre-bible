@@ -133,3 +133,27 @@ func TestWriteSSE_MultipleEvents(t *testing.T) {
 		t.Errorf("frames are out of order: first at %d, second at %d", firstIdx, secondIdx)
 	}
 }
+
+// TestSseStatus_Format verifies the exact wire encoding of a status event:
+//
+//	event: status\ndata: {"msg":"<value>"}\n\n
+func TestSseStatus_Format(t *testing.T) {
+	tf := newTestFlusher()
+
+	err := sseStatus(tf, tf, "Reading resume.pdf…")
+	if err != nil {
+		t.Fatalf("sseStatus returned unexpected error: %v", err)
+	}
+
+	body := tf.Body.String()
+
+	if !strings.Contains(body, "event: status") {
+		t.Errorf("sseStatus body missing event name, got: %q", body)
+	}
+	if !strings.Contains(body, `"msg":"Reading resume.pdf`) {
+		t.Errorf("sseStatus body missing msg field, got: %q", body)
+	}
+	if !tf.flushed {
+		t.Error("sseStatus did not call Flush")
+	}
+}

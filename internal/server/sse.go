@@ -14,7 +14,7 @@ type donePayload struct {
 	Citations []string `json:"citations"`
 }
 
-type errorPayload struct {
+type msgPayload struct {
 	Msg string `json:"msg"`
 }
 
@@ -47,5 +47,12 @@ func sseDone(w http.ResponseWriter, f http.Flusher, citations []string) error {
 
 // sseError sends an error event to the client.
 func sseError(w http.ResponseWriter, f http.Flusher, msg string) error {
-	return writeSSE(w, f, "error", errorPayload{Msg: msg})
+	return writeSSE(w, f, "error", msgPayload{Msg: msg})
+}
+
+// sseStatus sends a transient status message to the client.
+// Status messages are informational (e.g. "Reading resume.pdf…") and are not
+// persisted to session history.
+func sseStatus(w http.ResponseWriter, f http.Flusher, msg string) error {
+	return writeSSE(w, f, "status", msgPayload{Msg: msg})
 }

@@ -27,6 +27,12 @@ go.work.sum
 # env file
 .env
 
+# Terraform — local state and secrets
+terraform.tfvars
+*.tfstate
+*.tfstate.backup
+.terraform/
+
 # Editor/IDE
 # .idea/
 # .vscode/
@@ -36,5 +42,5 @@ go.work.sum
 
 # Build outputs
 bin/
-query
+/query
 /server

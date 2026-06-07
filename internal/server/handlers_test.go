@@ -46,14 +46,22 @@ func (s *stubSessions) AppendMessage(_ context.Context, sid string, msg rag.Mess
 
 // stubPipeline implements Answerer with controllable tokens and citations.
 type stubPipeline struct {
-	tokens    []string
-	citations []string
-	err       error
+	tokens     []string
+	citations  []string
+	err        error
+	statusMsgs []string // status messages emitted via onStatus
 }
 
-func (p *stubPipeline) Answer(_ context.Context, _ []rag.Message, _ string, onToken func(string) error) ([]string, error) {
+func (p *stubPipeline) Answer(_ context.Context, _ []rag.Message, _ string, onToken func(string) error, onStatus func(string) error) ([]string, error) {
 	if p.err != nil {
 		return nil, p.err
+	}
+	for _, msg := range p.statusMsgs {
+		if onStatus != nil {
+			if err := onStatus(msg); err != nil {
+				return nil, err
+			}
+		}
 	}
 	for _, t := range p.tokens {
 		if err := onToken(t); err != nil {
@@ -314,6 +322,49 @@ func TestHandleChat_HappyPath(t *testing.T) {
 	}
 	if len(assistantCall.citations) != 1 || assistantCall.citations[0] != "src.pdf" {
 		t.Errorf("second AppendMessage call citations = %v, want [src.pdf]", assistantCall.citations)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestHandleChat_StatusEventForwarded
+// ---------------------------------------------------------------------------
+
+// TestHandleChat_StatusEventForwarded verifies that when the pipeline emits a
+// status message via onStatus, a "event: status" SSE frame is written to the
+// response before the token frames.
+func TestHandleChat_StatusEventForwarded(t *testing.T) {
+	t.Parallel()
+
+	sessions := &stubSessions{}
+	pipeline := &stubPipeline{
+		statusMsgs: []string{"Reading resume.pdf…"},
+		tokens:     []string{"answer"},
+		citations:  []string{"resume.pdf"},
+	}
+	srv := newTestServer(t, pipeline, sessions)
+
+	form := url.Values{}
+	form.Set("question", "what is anthony's work history?")
+	req := httptest.NewRequest(http.MethodPost, "/chat", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: cookieName, Value: "aabbccdd-0000-4000-8000-000000000007"})
+
+	tf := newTestFlusher()
+	srv.ServeHTTP(tf, req)
+
+	body := tf.Body.String()
+
+	if !strings.Contains(body, "event: status") {
+		t.Errorf("response body missing 'event: status' frame; got:\n%s", body)
+	}
+	if !strings.Contains(body, "Reading resume.pdf") {
+		t.Errorf("response body missing status message content; got:\n%s", body)
+	}
+	// Status must appear before the token frame.
+	statusIdx := strings.Index(body, "event: status")
+	tokenIdx := strings.Index(body, "event: token")
+	if statusIdx >= tokenIdx {
+		t.Errorf("status frame must precede token frame; statusIdx=%d tokenIdx=%d", statusIdx, tokenIdx)
 	}
 }
 

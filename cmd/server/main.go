@@ -89,7 +89,7 @@ func run(log *slog.Logger) error {
 	sourceStore := db.NewSourceStore(pool, log)
 	sessionStore := db.NewSessionStore(pool, log)
 	llmClient := llm.NewClient(anthropicKey, model, rag.SystemPrompt, log)
-	pipeline := rag.NewPipeline(geminiClient, sourceStore, llmClient, 0, log)
+	pipeline := rag.NewPipeline(geminiClient, sourceStore, llmClient, sourceStore, sourceStore, 0, log)
 
 	srv, err := server.NewServer(pipeline, sessionStore, pool, log)
 	if err != nil {

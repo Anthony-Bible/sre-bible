@@ -152,6 +152,15 @@
 
         #streaming-bubble { display: none; }
 
+        #status-indicator {
+            font-size: 0.8125rem;
+            color: #64748b;
+            font-style: italic;
+            min-height: 1.2em;
+            padding: 0 0.25rem;
+            transition: opacity 0.15s;
+        }
+
         .streaming-cursor::after {
             content: '▋';
             animation: blink 0.9s step-end infinite;
@@ -249,6 +258,8 @@
         </div>
         {{end}}
 
+        <div id="status-indicator"></div>
+
         <div id="streaming-bubble" class="message assistant">
             <div class="msg-body" id="streaming-content"></div>
         </div>
@@ -325,7 +336,16 @@
             scrollToBottom();
         }
 
+        function showStatus(msg) {
+            document.getElementById('status-indicator').textContent = msg;
+        }
+
+        function clearStatus() {
+            document.getElementById('status-indicator').textContent = '';
+        }
+
         function finalizeStreamingBubble(text, citations) {
+            clearStatus();
             const bubble = document.getElementById('streaming-bubble');
             bubble.style.display = 'none';
             document.getElementById('streaming-content').innerHTML = '';
@@ -349,6 +369,7 @@
         }
 
         function showError(msg) {
+            clearStatus();
             document.getElementById('streaming-bubble').style.display = 'none';
             document.getElementById('streaming-content').innerHTML = '';
 
@@ -411,8 +432,11 @@
                         }
                         if (!data) continue;
                         if (event === 'token') {
+                            clearStatus();
                             accum += JSON.parse(data).t;
                             updateStreamingBubble(marked.parse(accum));
+                        } else if (event === 'status') {
+                            showStatus(JSON.parse(data).msg);
                         } else if (event === 'done') {
                             finalizeStreamingBubble(accum, JSON.parse(data).citations);
                         } else if (event === 'error') {

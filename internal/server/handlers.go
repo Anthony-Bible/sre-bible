@@ -153,10 +153,13 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var buf strings.Builder
+	onStatus := func(msg string) error {
+		return sseStatus(w, flusher, msg)
+	}
 	citations, err := s.pipeline.Answer(ctx, history, question, func(tok string) error {
 		buf.WriteString(tok)
 		return sseToken(w, flusher, tok)
-	})
+	}, onStatus)
 	if err != nil {
 		s.log.ErrorContext(ctx, "pipeline answer", slog.Any("err", err), slog.String("session", sid))
 		_ = sseError(w, flusher, "failed to generate response")

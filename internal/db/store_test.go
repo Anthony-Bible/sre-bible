@@ -525,3 +525,128 @@ func TestReplaceSource_ReplacingOneSourceDoesNotAffectOther(t *testing.T) {
 		t.Errorf("source B chunk count should be unchanged at 1, got %d", nB)
 	}
 }
+
+// --- Contract 8: Full-text storage and retrieval ---
+
+// TestReplaceSource_FullTextRoundTrips verifies that full_text set during
+// ReplaceSource is returned verbatim by GetFullText.
+func TestReplaceSource_FullTextRoundTrips(t *testing.T) {
+	pool, cleanup := testDB(t)
+	defer cleanup()
+
+	store := db.NewSourceStore(pool, slog.Default())
+	src := ingest.Source{
+		Name:     "fulltext-a",
+		Type:     "pdf",
+		Location: "/a.pdf",
+		FullText: "This is the complete extracted text of document A.",
+	}
+	chunk := ingest.Chunk{Idx: 0, Content: "excerpt", Embedding: makeEmbedding(1)}
+
+	if err := store.ReplaceSource(context.Background(), src, []ingest.Chunk{chunk}); err != nil {
+		t.Fatalf("ReplaceSource: %v", err)
+	}
+
+	text, found, err := store.GetFullText(context.Background(), "fulltext-a")
+	if err != nil {
+		t.Fatalf("GetFullText: %v", err)
+	}
+	if !found {
+		t.Fatal("GetFullText: found=false, want true")
+	}
+	if text != src.FullText {
+		t.Errorf("GetFullText text: got %q, want %q", text, src.FullText)
+	}
+}
+
+// TestGetFullText_NullFullText verifies that a source stored without full_text
+// (empty string → stored as NULL) returns found=false.
+func TestGetFullText_NullFullText(t *testing.T) {
+	pool, cleanup := testDB(t)
+	defer cleanup()
+
+	store := db.NewSourceStore(pool, slog.Default())
+	src := ingest.Source{Name: "fulltext-null", Type: "url", Location: "https://example.com"}
+	chunk := ingest.Chunk{Idx: 0, Content: "x", Embedding: makeEmbedding(2)}
+
+	if err := store.ReplaceSource(context.Background(), src, []ingest.Chunk{chunk}); err != nil {
+		t.Fatalf("ReplaceSource: %v", err)
+	}
+
+	_, found, err := store.GetFullText(context.Background(), "fulltext-null")
+	if err != nil {
+		t.Fatalf("GetFullText: %v", err)
+	}
+	if found {
+		t.Error("GetFullText: found=true for source with empty FullText (stored as NULL), want false")
+	}
+}
+
+// TestGetFullText_UnknownSource verifies that GetFullText returns found=false
+// (not an error) when the named source does not exist.
+func TestGetFullText_UnknownSource(t *testing.T) {
+	pool, cleanup := testDB(t)
+	defer cleanup()
+
+	store := db.NewSourceStore(pool, slog.Default())
+
+	_, found, err := store.GetFullText(context.Background(), "does-not-exist")
+	if err != nil {
+		t.Fatalf("GetFullText: unexpected error: %v", err)
+	}
+	if found {
+		t.Error("GetFullText: found=true for non-existent source, want false")
+	}
+}
+
+// TestListSources_Empty verifies that ListSources returns an empty slice (not
+// an error) when there are no sources.
+func TestListSources_Empty(t *testing.T) {
+	pool, cleanup := testDB(t)
+	defer cleanup()
+
+	store := db.NewSourceStore(pool, slog.Default())
+
+	docs, err := store.ListSources(context.Background())
+	if err != nil {
+		t.Fatalf("ListSources: %v", err)
+	}
+	if len(docs) != 0 {
+		t.Errorf("ListSources on empty table: got %d docs, want 0", len(docs))
+	}
+}
+
+// TestListSources_ReturnsSortedNameAndType verifies that ListSources returns
+// one entry per source with the correct name and type, ordered by name.
+func TestListSources_ReturnsSortedNameAndType(t *testing.T) {
+	pool, cleanup := testDB(t)
+	defer cleanup()
+
+	store := db.NewSourceStore(pool, slog.Default())
+	chunk := ingest.Chunk{Idx: 0, Content: "c", Embedding: makeEmbedding(3)}
+
+	srcs := []ingest.Source{
+		{Name: "zzz.pdf", Type: "pdf", Location: "/zzz.pdf"},
+		{Name: "aaa.html", Type: "url", Location: "https://aaa.example.com"},
+	}
+	for _, s := range srcs {
+		if err := store.ReplaceSource(context.Background(), s, []ingest.Chunk{chunk}); err != nil {
+			t.Fatalf("ReplaceSource(%s): %v", s.Name, err)
+		}
+	}
+
+	docs, err := store.ListSources(context.Background())
+	if err != nil {
+		t.Fatalf("ListSources: %v", err)
+	}
+	if len(docs) != 2 {
+		t.Fatalf("ListSources: got %d docs, want 2", len(docs))
+	}
+	// Ordered by name: aaa.html < zzz.pdf
+	if docs[0].Name != "aaa.html" || docs[0].Type != "url" {
+		t.Errorf("docs[0]: got {%s %s}, want {aaa.html url}", docs[0].Name, docs[0].Type)
+	}
+	if docs[1].Name != "zzz.pdf" || docs[1].Type != "pdf" {
+		t.Errorf("docs[1]: got {%s %s}, want {zzz.pdf pdf}", docs[1].Name, docs[1].Type)
+	}
+}

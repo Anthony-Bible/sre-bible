@@ -12,12 +12,16 @@ type Pipeline struct {
 	embedder  QueryEmbedder
 	searcher  ChunkSearcher
 	generator Generator
+	lister    DocumentLister
+	fetcher   FullTextFetcher
 	k         int
 	log       *slog.Logger
 }
 
 // NewPipeline creates a Pipeline. Pass k=0 to use defaultK (8).
-func NewPipeline(embedder QueryEmbedder, searcher ChunkSearcher, generator Generator, k int, log *slog.Logger) *Pipeline {
+// lister and fetcher may be nil; when both are non-nil the model may invoke
+// the list_documents / fetch_full_document tools to escalate beyond chunks.
+func NewPipeline(embedder QueryEmbedder, searcher ChunkSearcher, generator Generator, lister DocumentLister, fetcher FullTextFetcher, k int, log *slog.Logger) *Pipeline {
 	if k <= 0 {
 		k = defaultK
 	}
@@ -28,6 +32,8 @@ func NewPipeline(embedder QueryEmbedder, searcher ChunkSearcher, generator Gener
 		embedder:  embedder,
 		searcher:  searcher,
 		generator: generator,
+		lister:    lister,
+		fetcher:   fetcher,
 		k:         k,
 		log:       log,
 	}
@@ -38,9 +44,10 @@ func NewPipeline(embedder QueryEmbedder, searcher ChunkSearcher, generator Gener
 // deduplicated citation source names.
 //
 // history contains prior turns from the Session (may be empty for first turn).
-// citations are returned after streaming completes; they are derived from
-// retrieved chunks, not from Claude's output.
-func (p *Pipeline) Answer(ctx context.Context, history []Message, question string, onToken func(string) error) ([]string, error) {
+// onStatus, if non-nil, receives transient status messages during tool rounds.
+// citations include both vector-retrieved chunk sources and any documents fetched
+// via the fetch_full_document tool during generation.
+func (p *Pipeline) Answer(ctx context.Context, history []Message, question string, onToken func(string) error, onStatus func(string) error) ([]string, error) {
 	queryVec, err := p.embedder.EmbedQuery(ctx, question)
 	if err != nil {
 		return nil, err
@@ -64,16 +71,24 @@ func (p *Pipeline) Answer(ctx context.Context, history []Message, question strin
 	copy(messages, history)
 	messages[len(history)] = currentMsg
 
-	if err := p.generator.StreamAnswer(ctx, messages, onToken); err != nil {
+	tools := ToolSet{Lister: p.lister, Fetcher: p.fetcher}
+	toolFetched, err := p.generator.StreamAnswer(ctx, messages, tools, onToken, onStatus)
+	if err != nil {
 		return nil, err
 	}
 
-	var citations []string
 	seen := make(map[string]struct{})
+	var citations []string
 	for _, c := range chunks {
 		if _, ok := seen[c.SourceName]; !ok {
 			seen[c.SourceName] = struct{}{}
 			citations = append(citations, c.SourceName)
+		}
+	}
+	for _, name := range toolFetched {
+		if _, ok := seen[name]; !ok {
+			seen[name] = struct{}{}
+			citations = append(citations, name)
 		}
 	}
 

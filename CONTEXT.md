@@ -37,3 +37,12 @@ A footnote-style source attribution displayed at the bottom of each Resume Agent
 
 ### Message
 A single conversational turn within a Session. Each Message has a role (`user` or `assistant`) and a text content. User Messages contain the Viewer's question. Assistant Messages contain the Resume Agent's response. Messages are persisted to Cloud SQL and are visible to the Owner for analytics.
+
+### Full Text
+The complete Gemini-extracted markdown of a Source, stored in the `sources.full_text` column at ingestion time. Used by the Resume Agent when retrieved Chunks are insufficient to answer a question — see Tool and Escalation. Nullable: legacy rows ingested before this column existed have `full_text = NULL` and degrade gracefully.
+
+### Tool
+A capability the Resume Agent's model may invoke during answer generation, beyond the initial chunk context. Two tools exist: `list_documents` (returns all Source names and types) and `fetch_full_document` (returns the Full Text of a named Source). Tools are defined in `internal/llm` and exposed to the model via the Anthropic tool-use API. The tool loop is capped at 5 rounds.
+
+### Escalation
+The act of the Resume Agent fetching a Source's Full Text when the initially retrieved Chunks are insufficient to answer a Viewer's question. Escalation is model-driven — the Resume Agent decides when Chunks are inadequate and calls the appropriate Tool. Escalation produces a transient status message visible in the chat UI ("Reading resume.pdf…") but does not alter session history or citations.
