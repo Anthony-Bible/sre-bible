@@ -64,7 +64,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Render deployment manifest
         run: |
-          sed -i "s|%{IMAGE_SHA}|${IMAGE_DIGEST}|g" deploy/deployment.yaml
+          sed -i \
+            -e "s|%{IMAGE_SHA}|${IMAGE_DIGEST}|g" \
+            -e "s|ghcr\.io/anthony-bible/sre-bible@sha256:[a-f0-9]*|ghcr.io/anthony-bible/sre-bible@${IMAGE_DIGEST}|g" \
+            deploy/deployment.yaml
       - name: Commit updated manifest
         run: |
           git config user.email "cd@sre.bible"
