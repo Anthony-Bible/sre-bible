@@ -40,6 +40,7 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 
 type chatData struct {
 	SuggestedQuestions []string
+	TurnstileSiteKey   string
 }
 
 // messageDTO is the JSON shape returned by GET /messages.
@@ -53,6 +54,7 @@ type messageDTO struct {
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	data := chatData{
 		SuggestedQuestions: defaultSuggestedQuestions(),
+		TurnstileSiteKey:   s.turnstileSiteKey,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -117,6 +119,48 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ctx := r.Context()
+
+	if err := s.sessions.CreateSession(ctx, sid); err != nil {
+		s.log.ErrorContext(ctx, "create session", slog.Any("err", err), slog.String("session", sid))
+		http.Error(w, "failed to initialise session", http.StatusInternalServerError)
+		return
+	}
+
+	// Turnstile gate — skipped when no verifier is configured (tests, local dev without keys).
+	if s.turnstile != nil {
+		verified, err := s.sessions.IsSessionVerified(ctx, sid)
+		if err != nil {
+			s.log.ErrorContext(ctx, "check session verified", slog.Any("err", err), slog.String("session", sid))
+			http.Error(w, "session error", http.StatusInternalServerError)
+			return
+		}
+		if !verified {
+			token := strings.TrimSpace(r.FormValue("cf-turnstile-response"))
+			if token == "" {
+				http.Error(w, "verification required", http.StatusForbidden)
+				return
+			}
+			remoteIP := r.Header.Get("Cf-Connecting-Ip")
+			if remoteIP == "" {
+				remoteIP = r.RemoteAddr
+			}
+			tokenOK, verifyErr := s.turnstile.Verify(ctx, token, remoteIP)
+			if verifyErr != nil || !tokenOK {
+				s.log.InfoContext(ctx, "turnstile verification failed",
+					slog.Any("err", verifyErr),
+					slog.String("session", sid),
+				)
+				http.Error(w, "verification failed", http.StatusForbidden)
+				return
+			}
+			if err := s.sessions.MarkSessionVerified(ctx, sid); err != nil {
+				s.log.ErrorContext(ctx, "mark session verified", slog.Any("err", err), slog.String("session", sid))
+				// Log-and-continue; do not block the answer.
+			}
+		}
+	}
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
@@ -124,14 +168,6 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming not supported", http.StatusInternalServerError)
-		return
-	}
-
-	ctx := r.Context()
-
-	if err := s.sessions.CreateSession(ctx, sid); err != nil {
-		s.log.ErrorContext(ctx, "create session", slog.Any("err", err), slog.String("session", sid))
-		_ = sseError(w, flusher, "failed to initialise session")
 		return
 	}
 

@@ -19,11 +19,15 @@ import (
 
 // stubSessions implements SessionRepository with controllable behavior.
 type stubSessions struct {
-	createErr error
-	listErr   error
-	appendErr error
-	messages  []StoredMessage
-	appended  []appendedCall
+	createErr       error
+	listErr         error
+	appendErr       error
+	messages        []StoredMessage
+	appended        []appendedCall
+	isVerified      bool
+	verifyErr       error
+	markVerifiedErr error
+	markCalls       int
 }
 
 type appendedCall struct {
@@ -43,6 +47,27 @@ func (s *stubSessions) ListMessages(_ context.Context, _ string) ([]StoredMessag
 func (s *stubSessions) AppendMessage(_ context.Context, sid string, msg rag.Message, cit []string) error {
 	s.appended = append(s.appended, appendedCall{sid, msg, cit})
 	return s.appendErr
+}
+
+func (s *stubSessions) IsSessionVerified(_ context.Context, _ string) (bool, error) {
+	return s.isVerified, s.verifyErr
+}
+
+func (s *stubSessions) MarkSessionVerified(_ context.Context, _ string) error {
+	s.markCalls++
+	return s.markVerifiedErr
+}
+
+// stubTurnstile implements TurnstileVerifier with controllable behavior.
+type stubTurnstile struct {
+	ok        bool
+	err       error
+	callCount int
+}
+
+func (st *stubTurnstile) Verify(_ context.Context, _, _ string) (bool, error) {
+	st.callCount++
+	return st.ok, st.err
 }
 
 // stubPipeline implements Answerer with controllable tokens and citations.
@@ -76,11 +101,20 @@ func (p *stubPipeline) Answer(_ context.Context, _ string, _ []rag.Message, _ st
 // Helpers
 // ---------------------------------------------------------------------------
 
-// newTestServer builds a *Server under test using NewServer so that the full
-// route registration path (including mux wiring) is exercised.
+// newTestServer builds a *Server under test with no Turnstile verifier (skips the check).
 func newTestServer(t *testing.T, pipeline Answerer, sessions SessionRepository) *Server {
 	t.Helper()
-	srv, err := NewServer(pipeline, sessions, nil, nil)
+	srv, err := NewServer(pipeline, sessions, nil, nil, "", nil)
+	if err != nil {
+		t.Fatalf("NewServer returned unexpected error: %v", err)
+	}
+	return srv
+}
+
+// newTestServerWithTurnstile builds a *Server under test with the given Turnstile verifier.
+func newTestServerWithTurnstile(t *testing.T, pipeline Answerer, sessions SessionRepository, ts TurnstileVerifier) *Server {
+	t.Helper()
+	srv, err := NewServer(pipeline, sessions, nil, ts, "test-site-key", nil)
 	if err != nil {
 		t.Fatalf("NewServer returned unexpected error: %v", err)
 	}
@@ -456,7 +490,7 @@ func TestHandleChat_StatusEventForwarded(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestHandleChat_CreateSessionFails verifies that when CreateSession returns an
-// error the handler emits an "event: error" SSE frame.
+// error the handler responds 500 — CreateSession runs before SSE headers are set.
 func TestHandleChat_CreateSessionFails(t *testing.T) {
 	t.Parallel()
 
@@ -471,12 +505,133 @@ func TestHandleChat_CreateSessionFails(t *testing.T) {
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set(sessionHeader, "aabbccdd-0000-4000-8000-000000000005")
 
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusInternalServerError)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Turnstile gate tests
+// ---------------------------------------------------------------------------
+
+// TestHandleChat_Turnstile_NoToken verifies that a first-message POST with no
+// cf-turnstile-response token is rejected with 403 before the pipeline runs.
+func TestHandleChat_Turnstile_NoToken(t *testing.T) {
+	t.Parallel()
+
+	sessions := &stubSessions{}
+	ts := &stubTurnstile{ok: true}
+	pipeline := &stubPipeline{tokens: []string{"hi"}}
+	srv := newTestServerWithTurnstile(t, pipeline, sessions, ts)
+
+	form := url.Values{}
+	form.Set("question", "what is SRE?")
+	req := httptest.NewRequest(http.MethodPost, "/chat", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set(sessionHeader, "aabbccdd-0000-4000-8000-000000000010")
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d (no token)", rr.Code, http.StatusForbidden)
+	}
+	if ts.callCount != 0 {
+		t.Errorf("Verify called %d time(s), want 0 for empty token", ts.callCount)
+	}
+	if len(sessions.appended) != 0 {
+		t.Errorf("AppendMessage called %d time(s), want 0 when rejected", len(sessions.appended))
+	}
+}
+
+// TestHandleChat_Turnstile_InvalidToken verifies that a first-message POST whose
+// token the verifier rejects is responded to with 403.
+func TestHandleChat_Turnstile_InvalidToken(t *testing.T) {
+	t.Parallel()
+
+	sessions := &stubSessions{}
+	ts := &stubTurnstile{ok: false}
+	srv := newTestServerWithTurnstile(t, &stubPipeline{}, sessions, ts)
+
+	form := url.Values{}
+	form.Set("question", "what is SRE?")
+	form.Set("cf-turnstile-response", "bad-token")
+	req := httptest.NewRequest(http.MethodPost, "/chat", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set(sessionHeader, "aabbccdd-0000-4000-8000-000000000011")
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d (bad token)", rr.Code, http.StatusForbidden)
+	}
+	if len(sessions.appended) != 0 {
+		t.Errorf("AppendMessage called when verification failed")
+	}
+}
+
+// TestHandleChat_Turnstile_ValidToken verifies that a first-message POST with a
+// valid token runs the pipeline and calls MarkSessionVerified.
+func TestHandleChat_Turnstile_ValidToken(t *testing.T) {
+	t.Parallel()
+
+	sessions := &stubSessions{}
+	ts := &stubTurnstile{ok: true}
+	pipeline := &stubPipeline{tokens: []string{"answer"}, citations: []string{"src.pdf"}}
+	srv := newTestServerWithTurnstile(t, pipeline, sessions, ts)
+
+	form := url.Values{}
+	form.Set("question", "what is SRE?")
+	form.Set("cf-turnstile-response", "valid-token")
+	req := httptest.NewRequest(http.MethodPost, "/chat", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set(sessionHeader, "aabbccdd-0000-4000-8000-000000000012")
+
 	tf := newTestFlusher()
 	srv.ServeHTTP(tf, req)
 
-	body := tf.Body.String()
+	if tf.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 (valid token)", tf.Code)
+	}
+	if ts.callCount != 1 {
+		t.Errorf("Verify called %d time(s), want 1", ts.callCount)
+	}
+	if sessions.markCalls != 1 {
+		t.Errorf("MarkSessionVerified called %d time(s), want 1", sessions.markCalls)
+	}
+	if !strings.Contains(tf.Body.String(), "event: token") {
+		t.Errorf("expected SSE token frame in response")
+	}
+}
 
-	if !strings.Contains(body, "event: error") {
-		t.Errorf("response body missing 'event: error' frame when CreateSession fails; got:\n%s", body)
+// TestHandleChat_Turnstile_AlreadyVerified verifies that subsequent messages
+// from a verified session skip the Turnstile check entirely.
+func TestHandleChat_Turnstile_AlreadyVerified(t *testing.T) {
+	t.Parallel()
+
+	sessions := &stubSessions{isVerified: true}
+	ts := &stubTurnstile{ok: true}
+	pipeline := &stubPipeline{tokens: []string{"answer"}}
+	srv := newTestServerWithTurnstile(t, pipeline, sessions, ts)
+
+	form := url.Values{}
+	form.Set("question", "follow-up question")
+	// No cf-turnstile-response — session is already verified.
+	req := httptest.NewRequest(http.MethodPost, "/chat", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set(sessionHeader, "aabbccdd-0000-4000-8000-000000000013")
+
+	tf := newTestFlusher()
+	srv.ServeHTTP(tf, req)
+
+	if tf.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 (already verified)", tf.Code)
+	}
+	if ts.callCount != 0 {
+		t.Errorf("Verify called %d time(s) for already-verified session, want 0", ts.callCount)
 	}
 }

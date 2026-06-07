@@ -80,6 +80,13 @@ spec:
                 secretKeyRef:
                   name: sre-bible-secrets
                   key: AWS_SECRET_ACCESS_KEY
+            - name: TURNSTILE_SITE_KEY
+              value: "0x4AAAAAADgYcZEOr5G-BmBi"
+            - name: TURNSTILE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sre-bible-secrets
+                  key: TURNSTILE_SECRET_KEY
           livenessProbe:
             httpGet:
               path: /healthz

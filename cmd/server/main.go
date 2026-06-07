@@ -21,6 +21,7 @@ import (
 	"github.com/Anthony-Bible/sre-bible/internal/llm"
 	"github.com/Anthony-Bible/sre-bible/internal/rag"
 	"github.com/Anthony-Bible/sre-bible/internal/server"
+	"github.com/Anthony-Bible/sre-bible/internal/turnstile"
 )
 
 // compile-time assertions: placed here to avoid import cycles between db/rag and server.
@@ -30,6 +31,7 @@ var (
 	_ server.Pinger            = (*pgxpool.Pool)(nil)
 	_ email.ContactRepository  = (*db.ContactStore)(nil)
 	_ rag.EmailSender          = (*email.BoundSender)(nil)
+	_ server.TurnstileVerifier = (*turnstile.Verifier)(nil)
 )
 
 func main() {
@@ -61,6 +63,11 @@ func run(log *slog.Logger) error {
 	anthropicKey := os.Getenv("ANTHROPIC_API_KEY")
 	if anthropicKey == "" {
 		return fmt.Errorf("ANTHROPIC_API_KEY is required")
+	}
+
+	turnstileSiteKey, tsVerifier, err := setupTurnstile(log)
+	if err != nil {
+		return err
 	}
 
 	model := os.Getenv("CLAUDE_MODEL")
@@ -102,7 +109,7 @@ func run(log *slog.Logger) error {
 
 	pipeline := rag.NewPipeline(geminiClient, sourceStore, llmClient, sourceStore, sourceStore, emailerFactory, 0, log)
 
-	srv, err := server.NewServer(pipeline, sessionStore, pool, log)
+	srv, err := server.NewServer(pipeline, sessionStore, pool, tsVerifier, turnstileSiteKey, log)
 	if err != nil {
 		return fmt.Errorf("create server: %w", err)
 	}
@@ -192,4 +199,18 @@ func setupEmailer(ctx context.Context, pool *pgxpool.Pool, log *slog.Logger, out
 	)
 	*out = func(sid string) rag.EmailSender { return emailSvc.Bind(sid) }
 	return nil
+}
+
+// setupTurnstile reads the two required Turnstile env vars and returns the site key
+// and a configured verifier. Both vars are fatal — missing either fails startup.
+func setupTurnstile(log *slog.Logger) (string, *turnstile.Verifier, error) {
+	siteKey := os.Getenv("TURNSTILE_SITE_KEY")
+	if siteKey == "" {
+		return "", nil, fmt.Errorf("TURNSTILE_SITE_KEY is required")
+	}
+	secret := os.Getenv("TURNSTILE_SECRET_KEY")
+	if secret == "" {
+		return "", nil, fmt.Errorf("TURNSTILE_SECRET_KEY is required")
+	}
+	return siteKey, turnstile.NewVerifier(secret, log), nil
 }
