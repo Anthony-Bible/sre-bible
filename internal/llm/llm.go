@@ -10,6 +10,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 
+	"github.com/Anthony-Bible/sre-bible/internal/email"
 	"github.com/Anthony-Bible/sre-bible/internal/rag"
 )
 
@@ -18,6 +19,22 @@ const maxToolRounds = 5
 const (
 	toolListDocuments     = "list_documents"
 	toolFetchFullDocument = "fetch_full_document"
+	toolSendContactEmail  = "send_contact_email"
+)
+
+// schema map key constants (used in buildToolParams property maps).
+const (
+	schemaType        = "type"
+	schemaDescription = "description"
+	schemaTypeString  = "string"
+)
+
+// send_contact_email field name constants.
+const (
+	fieldSenderName     = "sender_name"
+	fieldSenderEmail    = "sender_email"
+	fieldMessage        = "message"
+	fieldConfirmedDraft = "confirmed_draft"
 )
 
 // Client wraps the Anthropic SDK and satisfies rag.Generator.
@@ -168,11 +185,40 @@ func buildToolParams(tools rag.ToolSet) []anthropic.ToolUnionParam {
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Properties: map[string]any{
 					"source_name": map[string]any{
-						"type":        "string",
-						"description": "The exact document name as returned by list_documents.",
+						schemaType:        schemaTypeString,
+						schemaDescription: "The exact document name as returned by list_documents.",
 					},
 				},
 				Required: []string{"source_name"},
+			},
+		}
+		result = append(result, anthropic.ToolUnionParam{OfTool: &t})
+	}
+
+	if tools.Emailer != nil {
+		t := anthropic.ToolParam{
+			Name:        toolSendContactEmail,
+			Description: anthropic.String("Send an email to Anthony on the visitor's behalf. Only call after: (1) the visitor has explicitly provided their name, email address, and message — never invent or guess these values; and (2) you have shown the visitor a draft of the email and they have confirmed they want to send it. Set confirmed_draft=true only after the visitor has seen and approved the draft."),
+			InputSchema: anthropic.ToolInputSchemaParam{
+				Properties: map[string]any{
+					fieldSenderName: map[string]any{
+						schemaType:        schemaTypeString,
+						schemaDescription: "The visitor's full name.",
+					},
+					fieldSenderEmail: map[string]any{
+						schemaType:        schemaTypeString,
+						schemaDescription: "The visitor's email address (used as Reply-To).",
+					},
+					fieldMessage: map[string]any{
+						schemaType:        schemaTypeString,
+						schemaDescription: "The message body to deliver to Anthony.",
+					},
+					fieldConfirmedDraft: map[string]any{
+						schemaType:        "boolean",
+						schemaDescription: "Set to true only after you have shown the visitor a draft of the email and they have explicitly confirmed they want to send it.",
+					},
+				},
+				Required: []string{fieldSenderName, fieldSenderEmail, fieldMessage, fieldConfirmedDraft},
 			},
 		}
 		result = append(result, anthropic.ToolUnionParam{OfTool: &t})
@@ -216,6 +262,34 @@ func (c *Client) runTool(ctx context.Context, tu anthropic.ToolUseBlock, tools r
 			return fmt.Sprintf("No document named %q is available (or it has no stored full text). Use list_documents to see valid names.", input.SourceName), false, ""
 		}
 		return text, false, input.SourceName
+
+	case toolSendContactEmail:
+		var input struct {
+			SenderName     string `json:"sender_name"`
+			SenderEmail    string `json:"sender_email"`
+			Message        string `json:"message"`
+			ConfirmedDraft bool   `json:"confirmed_draft"`
+		}
+		if err := json.Unmarshal(tu.Input, &input); err != nil {
+			return fmt.Sprintf("invalid send_contact_email arguments: %v", err), true, ""
+		}
+		if !input.ConfirmedDraft {
+			return "You must show the visitor a draft of the email and get their explicit confirmation before sending. Please present the draft and ask the visitor to confirm.", true, ""
+		}
+		_ = onStatus("Sending your message to Anthony…")
+		ok, reason, err := tools.Emailer.SendContactEmail(ctx, email.ContactEmail{
+			SenderName:  input.SenderName,
+			SenderEmail: input.SenderEmail,
+			Message:     input.Message,
+		})
+		if err != nil {
+			c.log.ErrorContext(ctx, "send contact email", slog.Any("err", err))
+			return "The email could not be sent due to an internal error. Apologize briefly to the visitor and suggest they reach Anthony at linkedin.com/in/anthonybible/ instead.", true, ""
+		}
+		if !ok {
+			return reason, true, ""
+		}
+		return "Your message was sent to Anthony successfully. Confirm this to the visitor.", false, ""
 
 	default:
 		return fmt.Sprintf("unknown tool: %s", tu.Name), true, ""

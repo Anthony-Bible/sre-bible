@@ -64,14 +64,14 @@ func run(log *slog.Logger) error {
 
 	store := db.NewSourceStore(pool, log)
 	llmCli := llm.NewClient(anthropicKey, "claude-haiku-4-5", rag.SystemPrompt, log)
-	pipe := rag.NewPipeline(gemCli, store, llmCli, store, store, 0, log)
+	pipe := rag.NewPipeline(gemCli, store, llmCli, store, store, nil, 0, log)
 
 	onStatus := func(msg string) error {
 		_, err := fmt.Fprintf(os.Stderr, "[%s]\n", msg)
 		return err
 	}
 
-	citations, err := pipe.Answer(ctx, nil, question, func(tok string) error {
+	citations, err := pipe.Answer(ctx, "", nil, question, func(tok string) error {
 		_, werr := fmt.Fprint(os.Stdout, tok)
 		return werr
 	}, onStatus)

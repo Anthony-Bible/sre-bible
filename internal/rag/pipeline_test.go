@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Anthony-Bible/sre-bible/internal/email"
 	"github.com/Anthony-Bible/sre-bible/internal/rag"
 )
 
@@ -53,9 +54,9 @@ func (g *stubGenerator) StreamAnswer(_ context.Context, messages []rag.Message, 
 	return g.fetchedNames, nil
 }
 
-// newPipe is a helper that builds a Pipeline with nil lister/fetcher (no tools).
+// newPipe is a helper that builds a Pipeline with nil lister/fetcher/emailerFor (no tools).
 func newPipe(searcher rag.ChunkSearcher, gen rag.Generator) *rag.Pipeline {
-	return rag.NewPipeline(stubEmbedder{}, searcher, gen, nil, nil, 0, nil)
+	return rag.NewPipeline(stubEmbedder{}, searcher, gen, nil, nil, nil, 0, nil)
 }
 
 func TestPipeline_EmptyChunkGuard(t *testing.T) {
@@ -65,7 +66,7 @@ func TestPipeline_EmptyChunkGuard(t *testing.T) {
 	pipe := newPipe(stubSearcher{chunks: nil}, gen)
 
 	var got []string
-	citations, err := pipe.Answer(context.Background(), nil, "anything?", func(tok string) error {
+	citations, err := pipe.Answer(context.Background(), "", nil, "anything?", func(tok string) error {
 		got = append(got, tok)
 		return nil
 	}, nil)
@@ -98,7 +99,7 @@ func TestPipeline_CitationDeduplication(t *testing.T) {
 	gen := &stubGenerator{tokens: []string{"answer"}}
 	pipe := newPipe(stubSearcher{chunks: chunks}, gen)
 
-	citations, err := pipe.Answer(context.Background(), nil, "q?", func(string) error { return nil }, nil)
+	citations, err := pipe.Answer(context.Background(), "", nil, "q?", func(string) error { return nil }, nil)
 	if err != nil {
 		t.Fatalf("Answer: %v", err)
 	}
@@ -126,7 +127,7 @@ func TestPipeline_HistoryPassedToGenerator(t *testing.T) {
 		{Role: rag.RoleAssistant, Content: "previous answer"},
 	}
 
-	_, err := pipe.Answer(context.Background(), history, "new question?", func(string) error { return nil }, nil)
+	_, err := pipe.Answer(context.Background(), "", history, "new question?", func(string) error { return nil }, nil)
 	if err != nil {
 		t.Fatalf("Answer: %v", err)
 	}
@@ -156,9 +157,9 @@ func TestPipeline_ToolSetThreaded(t *testing.T) {
 
 	stubLister := &stubDocumentLister{docs: []rag.DocumentInfo{{Name: "resume.pdf", Type: "pdf"}}}
 	stubFetcher := &stubFullTextFetcher{text: "full text"}
-	pipe := rag.NewPipeline(stubEmbedder{}, stubSearcher{chunks: chunks}, gen, stubLister, stubFetcher, 0, nil)
+	pipe := rag.NewPipeline(stubEmbedder{}, stubSearcher{chunks: chunks}, gen, stubLister, stubFetcher, nil, 0, nil)
 
-	_, err := pipe.Answer(context.Background(), nil, "q?", func(string) error { return nil }, nil)
+	_, err := pipe.Answer(context.Background(), "", nil, "q?", func(string) error { return nil }, nil)
 	if err != nil {
 		t.Fatalf("Answer: %v", err)
 	}
@@ -182,7 +183,7 @@ func TestPipeline_OnStatusThreaded(t *testing.T) {
 	pipe := newPipe(stubSearcher{chunks: chunks}, gen)
 
 	var statuses []string
-	_, err := pipe.Answer(context.Background(), nil, "q?", func(string) error { return nil }, func(msg string) error {
+	_, err := pipe.Answer(context.Background(), "", nil, "q?", func(string) error { return nil }, func(msg string) error {
 		statuses = append(statuses, msg)
 		return nil
 	})
@@ -205,7 +206,7 @@ func TestPipeline_ToolFetchedDocumentInCitations(t *testing.T) {
 	}
 	pipe := newPipe(stubSearcher{chunks: chunks}, gen)
 
-	citations, err := pipe.Answer(context.Background(), nil, "q?", func(string) error { return nil }, nil)
+	citations, err := pipe.Answer(context.Background(), "", nil, "q?", func(string) error { return nil }, nil)
 	if err != nil {
 		t.Fatalf("Answer: %v", err)
 	}
@@ -233,13 +234,57 @@ func TestPipeline_ToolFetchedDocumentDeduplicatedWithChunks(t *testing.T) {
 	}
 	pipe := newPipe(stubSearcher{chunks: chunks}, gen)
 
-	citations, err := pipe.Answer(context.Background(), nil, "q?", func(string) error { return nil }, nil)
+	citations, err := pipe.Answer(context.Background(), "", nil, "q?", func(string) error { return nil }, nil)
 	if err != nil {
 		t.Fatalf("Answer: %v", err)
 	}
 
 	if len(citations) != 1 || citations[0] != "resume.pdf" {
 		t.Errorf("citations: got %v, want [resume.pdf]", citations)
+	}
+}
+
+func TestPipeline_EmailerFactoryReceivesSessionID(t *testing.T) {
+	t.Parallel()
+
+	chunks := []rag.RetrievedChunk{{Content: "ctx", SourceName: "src"}}
+	gen := &stubGenerator{tokens: []string{"ok"}}
+
+	const wantSID = "test-session-abc"
+	var gotSID string
+	factory := func(sid string) rag.EmailSender {
+		gotSID = sid
+		return &stubEmailSender{}
+	}
+	pipe := rag.NewPipeline(stubEmbedder{}, stubSearcher{chunks: chunks}, gen, nil, nil, factory, 0, nil)
+
+	_, err := pipe.Answer(context.Background(), wantSID, nil, "q?", func(string) error { return nil }, nil)
+	if err != nil {
+		t.Fatalf("Answer: %v", err)
+	}
+
+	if gotSID != wantSID {
+		t.Errorf("factory received sessionID %q, want %q", gotSID, wantSID)
+	}
+	if gen.receivedTools.Emailer == nil {
+		t.Error("ToolSet.Emailer must be non-nil when factory is configured")
+	}
+}
+
+func TestPipeline_EmailerNilWhenNoFactory(t *testing.T) {
+	t.Parallel()
+
+	chunks := []rag.RetrievedChunk{{Content: "ctx", SourceName: "src"}}
+	gen := &stubGenerator{tokens: []string{"ok"}}
+	pipe := newPipe(stubSearcher{chunks: chunks}, gen)
+
+	_, err := pipe.Answer(context.Background(), "", nil, "q?", func(string) error { return nil }, nil)
+	if err != nil {
+		t.Fatalf("Answer: %v", err)
+	}
+
+	if gen.receivedTools.Emailer != nil {
+		t.Error("ToolSet.Emailer must be nil when no factory is configured")
 	}
 }
 
@@ -294,7 +339,7 @@ func TestBuildUserMessage(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// stub implementations for DocumentLister / FullTextFetcher
+// stub implementations for DocumentLister / FullTextFetcher / EmailSender
 // ---------------------------------------------------------------------------
 
 type stubDocumentLister struct {
@@ -312,4 +357,10 @@ type stubFullTextFetcher struct {
 
 func (s *stubFullTextFetcher) GetFullText(_ context.Context, _ string) (string, bool, error) {
 	return s.text, s.found, nil
+}
+
+type stubEmailSender struct{}
+
+func (s *stubEmailSender) SendContactEmail(_ context.Context, _ email.ContactEmail) (bool, string, error) {
+	return true, "", nil
 }

@@ -53,7 +53,7 @@ type stubPipeline struct {
 	statusMsgs []string // status messages emitted via onStatus
 }
 
-func (p *stubPipeline) Answer(_ context.Context, _ []rag.Message, _ string, onToken func(string) error, onStatus func(string) error) ([]string, error) {
+func (p *stubPipeline) Answer(_ context.Context, _ string, _ []rag.Message, _ string, onToken func(string) error, onStatus func(string) error) ([]string, error) {
 	if p.err != nil {
 		return nil, p.err
 	}
