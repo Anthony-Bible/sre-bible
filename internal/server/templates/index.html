@@ -255,7 +255,7 @@
                     placeholder="Ask about Anthony's experience..."
                     rows="1"></textarea>
                 {{if .TurnstileSiteKey}}
-                <div class="cf-turnstile" data-sitekey="{{.TurnstileSiteKey}}" data-execution="execute" data-callback="onTurnstileSuccess"></div>
+                <div class="cf-turnstile" data-sitekey="{{.TurnstileSiteKey}}" data-execution="execute" data-callback="onTurnstileSuccess" style="position:absolute;visibility:hidden;"></div>
                 {{end}}
                 <button id="send-btn" type="submit">Send</button>
             </form>
