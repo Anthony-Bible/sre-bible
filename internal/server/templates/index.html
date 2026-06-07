@@ -404,7 +404,7 @@
             if (existing) return existing;
             return new Promise(resolve => {
                 _turnstileResolve = resolve;
-                turnstile.execute();
+                turnstile.execute('.cf-turnstile');
             });
         }
 
