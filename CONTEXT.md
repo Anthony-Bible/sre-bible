@@ -6,7 +6,7 @@
 A person who visits `sre.bible` and interacts with the Resume Agent. Primarily recruiters and hiring managers, secondarily technical peers (engineers, CTOs). Viewers are always anonymous — no login or registration required.
 
 ### Session
-An anonymous, server-side conversation between a Viewer and the Resume Agent. Each Session is identified by a UUID generated at first page load. Sessions are persisted indefinitely in Cloud SQL and are visible to the Owner for analytics. Sessions contain no PII.
+An anonymous, server-side conversation between a Viewer and the Resume Agent. Each Session is identified by a UUID generated at first page load. Sessions are persisted indefinitely in Cloud SQL and are visible to the Owner for analytics. Sessions contain no system-collected PII; Viewers may volunteer contact details, which appear in Message content and Contact Email records.
 
 ### Source
 A document or URL provided by the Owner that forms the knowledge base of the Resume Agent. Supported types at launch: PDF files and web URLs. Sources are ingested via the `ingest` CLI — not through the web interface. A Source is identified by its citation name: the full URL for web sources, the file basename for PDFs. Re-ingesting a Source replaces its Chunks.
@@ -29,8 +29,11 @@ Anthony Bible. The person who deploys the system, runs ingestion, and has read a
 ### Resume Agent
 The conversational AI interface at `sre.bible`. Answers Viewer questions about the Owner's professional background, grounded exclusively in ingested Sources. Powered by Anthropic Claude for generation and Gemini for embeddings.
 
+### Contact Email
+A Viewer-initiated message that the Resume Agent delivers to the Owner via email. The Resume Agent composes the message from the conversation, shows the Viewer the draft, and sends only after explicit Viewer approval — at most one per Session, with a global hourly cap. Delivered via AWS SES; the Viewer's email address becomes the Reply-To. Viewer name and email are stored in the `contact_emails` table for audit purposes.
+
 ### Suggested Questions
-A curated set of 3–4 hardcoded prompts displayed to the Viewer before their first message. Intended to reduce friction and guide Viewers toward the Owner's strongest talking points. Disappear once the conversation begins.
+A curated set of 3–5 hardcoded prompts displayed to the Viewer before their first message. Intended to reduce friction and guide Viewers toward the Owner's strongest talking points. Disappear once the conversation begins.
 
 ### Citation
 A footnote-style source attribution displayed at the bottom of each Resume Agent response, listing which Sources the answer was drawn from (e.g., `resume.pdf`, `anthonybible.com/about`). Citations are source-level, not chunk-level.
@@ -42,7 +45,7 @@ A single conversational turn within a Session. Each Message has a role (`user` o
 The complete Gemini-extracted markdown of a Source, stored in the `sources.full_text` column at ingestion time. Used by the Resume Agent when retrieved Chunks are insufficient to answer a question — see Tool and Escalation. Nullable: legacy rows ingested before this column existed have `full_text = NULL` and degrade gracefully.
 
 ### Tool
-A capability the Resume Agent's model may invoke during answer generation, beyond the initial chunk context. Two tools exist: `list_documents` (returns all Source names and types) and `fetch_full_document` (returns the Full Text of a named Source). Tools are defined in `internal/llm` and exposed to the model via the Anthropic tool-use API. The tool loop is capped at 5 rounds.
+A capability the Resume Agent's model may invoke during answer generation, beyond the initial chunk context. Three tools exist: `list_documents` (returns all Source names and types), `fetch_full_document` (returns the Full Text of a named Source), and `send_contact_email` (delivers a Viewer-composed message to the Owner via AWS SES — see Contact Email). Tools are defined in `internal/llm` and exposed to the model via the Anthropic tool-use API. The tool loop is capped at 5 rounds.
 
 ### Escalation
 The act of the Resume Agent fetching a Source's Full Text when the initially retrieved Chunks are insufficient to answer a Viewer's question. Escalation is model-driven — the Resume Agent decides when Chunks are inadequate and calls the appropriate Tool. Escalation produces a transient status message visible in the chat UI ("Reading resume.pdf…") but does not alter session history or citations.

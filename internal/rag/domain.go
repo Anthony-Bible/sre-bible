@@ -1,6 +1,21 @@
 package rag
 
-import "context"
+import (
+	"context"
+
+	"github.com/Anthony-Bible/sre-bible/internal/email"
+)
+
+// EmailSender sends a single contact email on a Viewer's behalf.
+// ok=false + reason = expected, user-relayable refusal (rate limit, validation,
+// already sent, delivery failure). err != nil = internal failure (never shown raw).
+type EmailSender interface {
+	SendContactEmail(ctx context.Context, e email.ContactEmail) (ok bool, reason string, err error)
+}
+
+// EmailerFactory creates a session-bound EmailSender.
+// A nil factory means the send_contact_email tool is not advertised to the model.
+type EmailerFactory func(sessionID string) EmailSender
 
 // Role is the participant in a conversation turn.
 type Role string
@@ -57,6 +72,7 @@ type FullTextFetcher interface {
 type ToolSet struct {
 	Lister  DocumentLister
 	Fetcher FullTextFetcher
+	Emailer EmailSender
 }
 
 // Generator streams a grounded answer token by token via onToken callback.

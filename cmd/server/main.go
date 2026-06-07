@@ -8,12 +8,15 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Anthony-Bible/sre-bible/internal/db"
+	"github.com/Anthony-Bible/sre-bible/internal/email"
 	"github.com/Anthony-Bible/sre-bible/internal/gemini"
 	"github.com/Anthony-Bible/sre-bible/internal/llm"
 	"github.com/Anthony-Bible/sre-bible/internal/rag"
@@ -25,6 +28,8 @@ var (
 	_ server.SessionRepository = (*db.SessionStore)(nil)
 	_ server.Answerer          = (*rag.Pipeline)(nil)
 	_ server.Pinger            = (*pgxpool.Pool)(nil)
+	_ email.ContactRepository  = (*db.ContactStore)(nil)
+	_ rag.EmailSender          = (*email.BoundSender)(nil)
 )
 
 func main() {
@@ -89,7 +94,13 @@ func run(log *slog.Logger) error {
 	sourceStore := db.NewSourceStore(pool, log)
 	sessionStore := db.NewSessionStore(pool, log)
 	llmClient := llm.NewClient(anthropicKey, model, rag.SystemPrompt, log)
-	pipeline := rag.NewPipeline(geminiClient, sourceStore, llmClient, sourceStore, sourceStore, 0, log)
+
+	var emailerFactory rag.EmailerFactory
+	if err := setupEmailer(ctx, pool, log, &emailerFactory); err != nil {
+		return fmt.Errorf("setup emailer: %w", err)
+	}
+
+	pipeline := rag.NewPipeline(geminiClient, sourceStore, llmClient, sourceStore, sourceStore, emailerFactory, 0, log)
 
 	srv, err := server.NewServer(pipeline, sessionStore, pool, log)
 	if err != nil {
@@ -129,4 +140,56 @@ func run(log *slog.Logger) error {
 		}
 		return nil
 	}
+}
+
+// setupEmailer wires the contact-email tool when all required env vars are present.
+// Writes the factory into out; leaves it nil (feature disabled) when any required var is missing.
+func setupEmailer(ctx context.Context, pool *pgxpool.Pool, log *slog.Logger, out *rag.EmailerFactory) error {
+	emailFrom := strings.TrimSpace(os.Getenv("EMAIL_FROM"))
+	emailTo := strings.TrimSpace(os.Getenv("EMAIL_TO"))
+	awsRegion := strings.TrimSpace(os.Getenv("AWS_REGION"))
+	awsAccessKey := strings.TrimSpace(os.Getenv("AWS_ACCESS_KEY_ID"))
+	awsSecretKey := strings.TrimSpace(os.Getenv("AWS_SECRET_ACCESS_KEY"))
+
+	if emailFrom == "" || emailTo == "" || awsRegion == "" || awsAccessKey == "" || awsSecretKey == "" {
+		log.InfoContext(ctx, "contact email tool disabled: EMAIL_FROM, EMAIL_TO, AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY must all be set to enable")
+		return nil
+	}
+
+	globalLimit := 24
+	if s := strings.TrimSpace(os.Getenv("EMAIL_RATE_LIMIT_PER_HOUR")); s != "" {
+		n, err := strconv.Atoi(s)
+		if err != nil || n <= 0 {
+			log.WarnContext(ctx, "invalid EMAIL_RATE_LIMIT_PER_HOUR, using default",
+				slog.String("value", s),
+				slog.Int("default", globalLimit),
+			)
+		} else {
+			globalLimit = n
+		}
+	}
+
+	sesTx, err := email.NewSESTransport(ctx, email.SESConfig{
+		Region:    awsRegion,
+		AccessKey: awsAccessKey,
+		SecretKey: awsSecretKey,
+	})
+	if err != nil {
+		return fmt.Errorf("create SES transport: %w", err)
+	}
+
+	contactStore := db.NewContactStore(pool, log)
+	emailSvc := email.NewService(contactStore, sesTx, email.Config{
+		From:        emailFrom,
+		To:          emailTo,
+		GlobalLimit: globalLimit,
+		Window:      time.Hour,
+	}, log)
+
+	log.InfoContext(ctx, "contact email tool enabled",
+		slog.String("from", emailFrom),
+		slog.String("to", emailTo),
+	)
+	*out = func(sid string) rag.EmailSender { return emailSvc.Bind(sid) }
+	return nil
 }

@@ -9,19 +9,21 @@ const defaultK = 8
 
 // Pipeline wires together embedding, retrieval, and generation.
 type Pipeline struct {
-	embedder  QueryEmbedder
-	searcher  ChunkSearcher
-	generator Generator
-	lister    DocumentLister
-	fetcher   FullTextFetcher
-	k         int
-	log       *slog.Logger
+	embedder   QueryEmbedder
+	searcher   ChunkSearcher
+	generator  Generator
+	lister     DocumentLister
+	fetcher    FullTextFetcher
+	emailerFor EmailerFactory
+	k          int
+	log        *slog.Logger
 }
 
 // NewPipeline creates a Pipeline. Pass k=0 to use defaultK (8).
 // lister and fetcher may be nil; when both are non-nil the model may invoke
 // the list_documents / fetch_full_document tools to escalate beyond chunks.
-func NewPipeline(embedder QueryEmbedder, searcher ChunkSearcher, generator Generator, lister DocumentLister, fetcher FullTextFetcher, k int, log *slog.Logger) *Pipeline {
+// emailerFor may be nil; when non-nil, the send_contact_email tool is advertised.
+func NewPipeline(embedder QueryEmbedder, searcher ChunkSearcher, generator Generator, lister DocumentLister, fetcher FullTextFetcher, emailerFor EmailerFactory, k int, log *slog.Logger) *Pipeline {
 	if k <= 0 {
 		k = defaultK
 	}
@@ -29,13 +31,14 @@ func NewPipeline(embedder QueryEmbedder, searcher ChunkSearcher, generator Gener
 		log = slog.Default()
 	}
 	return &Pipeline{
-		embedder:  embedder,
-		searcher:  searcher,
-		generator: generator,
-		lister:    lister,
-		fetcher:   fetcher,
-		k:         k,
-		log:       log,
+		embedder:   embedder,
+		searcher:   searcher,
+		generator:  generator,
+		lister:     lister,
+		fetcher:    fetcher,
+		emailerFor: emailerFor,
+		k:          k,
+		log:        log,
 	}
 }
 
@@ -43,11 +46,13 @@ func NewPipeline(embedder QueryEmbedder, searcher ChunkSearcher, generator Gener
 // message history, streams a grounded response via onToken, and returns
 // deduplicated citation source names.
 //
+// sessionID identifies the current session; used to create a session-bound
+// EmailSender when an emailerFor factory is configured.
 // history contains prior turns from the Session (may be empty for first turn).
 // onStatus, if non-nil, receives transient status messages during tool rounds.
 // citations include both vector-retrieved chunk sources and any documents fetched
 // via the fetch_full_document tool during generation.
-func (p *Pipeline) Answer(ctx context.Context, history []Message, question string, onToken func(string) error, onStatus func(string) error) ([]string, error) {
+func (p *Pipeline) Answer(ctx context.Context, sessionID string, history []Message, question string, onToken func(string) error, onStatus func(string) error) ([]string, error) {
 	queryVec, err := p.embedder.EmbedQuery(ctx, question)
 	if err != nil {
 		return nil, err
@@ -72,6 +77,9 @@ func (p *Pipeline) Answer(ctx context.Context, history []Message, question strin
 	messages[len(history)] = currentMsg
 
 	tools := ToolSet{Lister: p.lister, Fetcher: p.fetcher}
+	if p.emailerFor != nil {
+		tools.Emailer = p.emailerFor(sessionID)
+	}
 	toolFetched, err := p.generator.StreamAnswer(ctx, messages, tools, onToken, onStatus)
 	if err != nil {
 		return nil, err

@@ -157,7 +157,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	onStatus := func(msg string) error {
 		return sseStatus(w, flusher, msg)
 	}
-	citations, err := s.pipeline.Answer(ctx, history, question, func(tok string) error {
+	citations, err := s.pipeline.Answer(ctx, sid, history, question, func(tok string) error {
 		buf.WriteString(tok)
 		return sseToken(w, flusher, tok)
 	}, onStatus)

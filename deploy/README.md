@@ -49,21 +49,66 @@ terraform output -raw db_password
 kubectl create namespace sre-bible
 ```
 
-### 3. Create Secrets
+### 3. AWS SES Setup (one-time per AWS account)
+
+SES is not managed by Terraform (GCP-only).
+
+#### 3a. Verify sender identity
+
+`server@password.exchange` must be verified in SES (us-west-2). If not already verified:
+
+```bash
+aws ses verify-email-identity --email-address server@password.exchange --region us-west-2
+```
+
+Click the confirmation link in the inbox.
+
+#### 3b. Confirm account is out of sandbox
+
+In the SES console (us-west-2), check **Account dashboard**. If still in sandbox, request production access. The account is currently out of sandbox.
+
+#### 3c. Create a dedicated IAM user
+
+```bash
+aws iam create-user --user-name sre-bible-ses
+aws iam put-user-policy --user-name sre-bible-ses \
+  --policy-name SendEmailOnly \
+  --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Action": "ses:SendEmail",
+      "Resource": "*"
+    }]
+  }'
+aws iam create-access-key --user-name sre-bible-ses
+```
+
+Save the printed `AccessKeyId` and `SecretAccessKey` — you will need them in the next step.
+
+### 4. Create Secrets
 
 ```bash
 kubectl create secret generic sre-bible-secrets -n sre-bible \
   --from-literal=ANTHROPIC_API_KEY=<key> \
   --from-literal=GEMINI_API_KEY=<key> \
-  --from-literal=DATABASE_URL="postgres://sre_bible:<password>@127.0.0.1:5432/sre_bible?sslmode=disable"
+  --from-literal=DATABASE_URL="postgres://sre_bible:<password>@127.0.0.1:5432/sre_bible?sslmode=disable" \
+  --from-literal=AWS_ACCESS_KEY_ID=<aws-access-key-id> \
+  --from-literal=AWS_SECRET_ACCESS_KEY=<aws-secret-access-key> \
+  --from-literal=EMAIL_TO=<destination-email-address> \
+  --from-literal=EMAIL_FROM=<ses-verified-sender-address>
 ```
+
+> The AWS keys belong to a dedicated IAM user with a policy scoped to
+> `ses:SendEmail` only. See [ADR 0006](../docs/adr/0006-aws-ses-for-contact-email.md)
+> and the AWS SES setup in step 3 above.
 
 > `DATABASE_URL` uses `127.0.0.1` — the loopback address to the Cloud SQL Auth
 > Proxy sidecar running in the same Pod. `sslmode=disable` is correct here: the
 > proxy handles mTLS to Cloud SQL; the intra-Pod connection is already on
 > loopback.
 
-### 4. Update deployment.yaml
+### 5. Update deployment.yaml
 
 Replace the placeholder in `deploy/deployment.yaml` with the real
 `instance_connection_name` from Terraform output:
@@ -73,7 +118,7 @@ Replace the placeholder in `deploy/deployment.yaml` with the real
 - "--instances=<INSTANCE_CONNECTION_NAME>=tcp:5432"
 ```
 
-### 5. Run Migrations and Ingest
+### 6. Run Migrations and Ingest
 
 Migrations must run from a **single process** before deploying — goose does not
 hold an advisory lock, so running from 2 replicas simultaneously causes races.
@@ -97,7 +142,7 @@ kill %1
 
 Or equivalently: `make ingest-prod` (see Makefile for the full incantation).
 
-### 6. Bootstrap ArgoCD Application
+### 7. Bootstrap ArgoCD Application
 
 This is a one-time step. After this, ArgoCD continuously reconciles
 `deploy/` from the main branch.
@@ -112,7 +157,7 @@ Verify sync:
 kubectl get application -n argocd sre-bible
 ```
 
-### 7. Make GHCR Package Public
+### 8. Make GHCR Package Public
 
 After the first GitHub Actions image push, make the package public so the
 kubelet can pull without credentials:
@@ -122,7 +167,7 @@ kubelet can pull without credentials:
 
 If you skip this step you will see `ImagePullBackOff` on all Pods.
 
-### 8. Confirm Cloudflare SSL Mode
+### 9. Confirm Cloudflare SSL Mode
 
 Ensure the Cloudflare zone SSL/TLS mode is set to **Full (strict)**. cert-manager
 issues a real Let's Encrypt certificate so strict mode works without an Origin
