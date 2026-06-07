@@ -96,12 +96,19 @@ kubectl create secret generic sre-bible-secrets -n sre-bible \
   --from-literal=AWS_ACCESS_KEY_ID=<aws-access-key-id> \
   --from-literal=AWS_SECRET_ACCESS_KEY=<aws-secret-access-key> \
   --from-literal=EMAIL_TO=<destination-email-address> \
-  --from-literal=EMAIL_FROM=<ses-verified-sender-address>
+  --from-literal=EMAIL_FROM=<ses-verified-sender-address> \
+  --from-literal=TURNSTILE_SECRET_KEY=<cloudflare-turnstile-secret-key>
 ```
 
 > The AWS keys belong to a dedicated IAM user with a policy scoped to
 > `ses:SendEmail` only. See [ADR 0006](../docs/adr/0006-aws-ses-for-contact-email.md)
 > and the AWS SES setup in step 3 above.
+
+> `TURNSTILE_SECRET_KEY` is the server-side secret from the Cloudflare Turnstile
+> dashboard (distinct from the public site key in `deployment.yaml`). The secret
+> **must be applied before ArgoCD syncs the new deployment** — the server fails
+> fast at startup when this key is absent. For local dev use the Cloudflare
+> always-pass test secret: `1x0000000000000000000000000000000AA`.
 
 > `DATABASE_URL` uses `127.0.0.1` — the loopback address to the Cloud SQL Auth
 > Proxy sidecar running in the same Pod. `sslmode=disable` is correct here: the

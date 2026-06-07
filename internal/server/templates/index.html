@@ -6,6 +6,7 @@
     <title>SRE Bible — Anthony Bible</title>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/dompurify/dist/purify.min.js"></script>
+    <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -253,6 +254,9 @@
                 <textarea id="question-input" name="question"
                     placeholder="Ask about Anthony's experience..."
                     rows="1"></textarea>
+                {{if .TurnstileSiteKey}}
+                <div class="cf-turnstile" data-sitekey="{{.TurnstileSiteKey}}" data-size="invisible"></div>
+                {{end}}
                 <button id="send-btn" type="submit">Send</button>
             </form>
         </div>
@@ -403,6 +407,10 @@
             showStreamingBubble();
             document.getElementById('send-btn').disabled = true;
 
+            const params = new URLSearchParams({ question: q });
+            const tt = window.turnstile && turnstile.getResponse();
+            if (tt) params.append('cf-turnstile-response', tt);
+
             let resp;
             try {
                 resp = await fetch('/chat', {
@@ -411,10 +419,17 @@
                         'Content-Type': 'application/x-www-form-urlencoded',
                         'X-Session-Id': getSessionId(),
                     },
-                    body: new URLSearchParams({ question: q }),
+                    body: params,
                 });
             } catch (err) {
                 showError('Connection failed');
+                return;
+            }
+
+            if (resp.status === 403) {
+                document.getElementById('send-btn').disabled = false;
+                showError('Please complete the verification challenge and try again.');
+                if (window.turnstile) turnstile.reset();
                 return;
             }
 

@@ -320,3 +320,76 @@ func TestListMessages_SessionIsolation(t *testing.T) {
 		t.Errorf("session B message content: got %q, want %q", msgsB[0].Content, msgB.Content)
 	}
 }
+
+// --- Contract 7: IsSessionVerified default false ---
+
+// TestIsSessionVerified_DefaultFalse verifies that a freshly created session
+// has turnstile_verified = false before MarkSessionVerified is called.
+func TestIsSessionVerified_DefaultFalse(t *testing.T) {
+	pool, cleanup := testSessionDB(t)
+	defer cleanup()
+
+	store := db.NewSessionStore(pool, slog.Default())
+	id := sessionID("777777777777")
+	ctx := context.Background()
+
+	if err := store.CreateSession(ctx, id); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	verified, err := store.IsSessionVerified(ctx, id)
+	if err != nil {
+		t.Fatalf("IsSessionVerified: %v", err)
+	}
+	if verified {
+		t.Error("IsSessionVerified returned true for a fresh session, want false")
+	}
+}
+
+// --- Contract 8: IsSessionVerified returns false for unknown session ---
+
+// TestIsSessionVerified_UnknownSession verifies that IsSessionVerified returns
+// (false, nil) when the session does not exist — no error, just false.
+func TestIsSessionVerified_UnknownSession(t *testing.T) {
+	pool, cleanup := testSessionDB(t)
+	defer cleanup()
+
+	store := db.NewSessionStore(pool, slog.Default())
+	ctx := context.Background()
+
+	verified, err := store.IsSessionVerified(ctx, sessionID("888888888888"))
+	if err != nil {
+		t.Fatalf("IsSessionVerified for unknown session: %v", err)
+	}
+	if verified {
+		t.Error("IsSessionVerified returned true for unknown session, want false")
+	}
+}
+
+// --- Contract 9: MarkSessionVerified round-trip ---
+
+// TestMarkSessionVerified_RoundTrip verifies that calling MarkSessionVerified
+// causes IsSessionVerified to return true for the same session.
+func TestMarkSessionVerified_RoundTrip(t *testing.T) {
+	pool, cleanup := testSessionDB(t)
+	defer cleanup()
+
+	store := db.NewSessionStore(pool, slog.Default())
+	id := sessionID("999999999999")
+	ctx := context.Background()
+
+	if err := store.CreateSession(ctx, id); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := store.MarkSessionVerified(ctx, id); err != nil {
+		t.Fatalf("MarkSessionVerified: %v", err)
+	}
+
+	verified, err := store.IsSessionVerified(ctx, id)
+	if err != nil {
+		t.Fatalf("IsSessionVerified after mark: %v", err)
+	}
+	if !verified {
+		t.Error("IsSessionVerified returned false after MarkSessionVerified, want true")
+	}
+}

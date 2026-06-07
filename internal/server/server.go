@@ -38,16 +38,26 @@ type SessionRepository interface {
 	CreateSession(ctx context.Context, sessionID string) error
 	ListMessages(ctx context.Context, sessionID string) ([]StoredMessage, error)
 	AppendMessage(ctx context.Context, sessionID string, msg rag.Message, citations []string) error
+	IsSessionVerified(ctx context.Context, sessionID string) (bool, error)
+	MarkSessionVerified(ctx context.Context, sessionID string) error
+}
+
+// TurnstileVerifier is the port for verifying Cloudflare Turnstile tokens.
+// Defined here (consumed here); implemented by *turnstile.Verifier.
+type TurnstileVerifier interface {
+	Verify(ctx context.Context, token, remoteIP string) (bool, error)
 }
 
 // Server wires together the RAG pipeline and session store behind HTTP handlers.
 type Server struct {
-	pipeline  Answerer
-	sessions  SessionRepository
-	pinger    Pinger
-	templates *template.Template
-	log       *slog.Logger
-	mux       *http.ServeMux
+	pipeline         Answerer
+	sessions         SessionRepository
+	pinger           Pinger
+	turnstile        TurnstileVerifier
+	turnstileSiteKey string
+	templates        *template.Template
+	log              *slog.Logger
+	mux              *http.ServeMux
 }
 
 // defaultSuggestedQuestions returns the prompts shown on first load when there
@@ -63,7 +73,8 @@ func defaultSuggestedQuestions() []string {
 }
 
 // NewServer creates a Server, parses embedded templates, and registers routes.
-func NewServer(pipeline Answerer, sessions SessionRepository, pinger Pinger, log *slog.Logger) (*Server, error) {
+// turnstile may be nil only in tests; in production main.go always provides one.
+func NewServer(pipeline Answerer, sessions SessionRepository, pinger Pinger, turnstile TurnstileVerifier, turnstileSiteKey string, log *slog.Logger) (*Server, error) {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -75,12 +86,14 @@ func NewServer(pipeline Answerer, sessions SessionRepository, pinger Pinger, log
 
 	mux := http.NewServeMux()
 	s := &Server{
-		pipeline:  pipeline,
-		sessions:  sessions,
-		pinger:    pinger,
-		templates: t,
-		log:       log,
-		mux:       mux,
+		pipeline:         pipeline,
+		sessions:         sessions,
+		pinger:           pinger,
+		turnstile:        turnstile,
+		turnstileSiteKey: turnstileSiteKey,
+		templates:        t,
+		log:              log,
+		mux:              mux,
 	}
 
 	mux.HandleFunc("GET /", s.handleIndex)

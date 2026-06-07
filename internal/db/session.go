@@ -2,9 +2,11 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Anthony-Bible/sre-bible/internal/rag"
@@ -82,6 +84,35 @@ func (s *SessionStore) AppendMessage(ctx context.Context, sessionID string, msg 
 	)
 	if err != nil {
 		return fmt.Errorf("append message: %w", err)
+	}
+	return nil
+}
+
+// IsSessionVerified returns true when the session's Turnstile verification has been confirmed.
+// Returns (false, nil) when the session does not exist.
+func (s *SessionStore) IsSessionVerified(ctx context.Context, sessionID string) (bool, error) {
+	var verified bool
+	err := s.pool.QueryRow(ctx,
+		`SELECT turnstile_verified FROM sessions WHERE id = $1`,
+		sessionID,
+	).Scan(&verified)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("is session verified: %w", err)
+	}
+	return verified, nil
+}
+
+// MarkSessionVerified sets turnstile_verified = true for the given session.
+func (s *SessionStore) MarkSessionVerified(ctx context.Context, sessionID string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE sessions SET turnstile_verified = true WHERE id = $1`,
+		sessionID,
+	)
+	if err != nil {
+		return fmt.Errorf("mark session verified: %w", err)
 	}
 	return nil
 }
