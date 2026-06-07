@@ -103,6 +103,7 @@ Turnstile: checked once per session. Session marked `verified` in DB after first
 
 - PostgreSQL 17 + pgvector extension.
 - Migrations via Goose (`pressly/goose/v3`), embedded SQL in `internal/db/migrations/`. Run automatically at server startup.
+- **Migrations must be idempotent.** Use `IF NOT EXISTS` / `IF EXISTS` guards on all `ADD COLUMN`, `DROP COLUMN`, `CREATE TABLE`, `CREATE INDEX`, etc. so re-running a migration against a DB that already has the change is safe.
 - Connection pool: max 5 conns (sized for Cloud SQL `db-f1-micro`).
 - `SourceStore` satisfies `ingest.SourceRepository`, `rag.ChunkSearcher`, `rag.DocumentLister`, `rag.FullTextFetcher` — compile-time assertions in `cmd/server/main.go`.
 - `SessionStore` satisfies `server.SessionRepository`.
