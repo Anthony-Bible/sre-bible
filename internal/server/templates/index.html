@@ -255,7 +255,7 @@
                     placeholder="Ask about Anthony's experience..."
                     rows="1"></textarea>
                 {{if .TurnstileSiteKey}}
-                <div class="cf-turnstile" data-sitekey="{{.TurnstileSiteKey}}" data-size="invisible"></div>
+                <div class="cf-turnstile" data-sitekey="{{.TurnstileSiteKey}}" data-execution="execute" data-callback="onTurnstileSuccess"></div>
                 {{end}}
                 <button id="send-btn" type="submit">Send</button>
             </form>
@@ -394,6 +394,20 @@
             document.getElementById('send-btn').disabled = false;
         }
 
+        let _turnstileResolve = null;
+        function onTurnstileSuccess(token) {
+            if (_turnstileResolve) { _turnstileResolve(token); _turnstileResolve = null; }
+        }
+        async function getTurnstileToken() {
+            if (!window.turnstile) return null;
+            const existing = turnstile.getResponse();
+            if (existing) return existing;
+            return new Promise(resolve => {
+                _turnstileResolve = resolve;
+                turnstile.execute();
+            });
+        }
+
         async function handleSubmit(e) {
             e.preventDefault();
             const q = document.getElementById('question-input').value.trim();
@@ -408,7 +422,7 @@
             document.getElementById('send-btn').disabled = true;
 
             const params = new URLSearchParams({ question: q });
-            const tt = window.turnstile && turnstile.getResponse();
+            const tt = await getTurnstileToken();
             if (tt) params.append('cf-turnstile-response', tt);
 
             let resp;
