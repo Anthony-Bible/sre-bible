@@ -40,8 +40,18 @@ type RetrievedChunk struct {
 
 // DocumentInfo is the summary of a Source returned by ListSources.
 type DocumentInfo struct {
-	Name string
-	Type string
+	Name        string
+	Type        string
+	Description string // empty for legacy rows
+}
+
+// String formats a DocumentInfo for display as "name (type)" or "name (type): description".
+func (d DocumentInfo) String() string {
+	s := d.Name + " (" + d.Type + ")"
+	if d.Description != "" {
+		return s + ": " + d.Description
+	}
+	return s
 }
 
 // QueryEmbedder converts a Viewer's question into a 768-dim query vector.

@@ -7,7 +7,7 @@ Accepted
 The system requires two distinct AI capabilities: text generation (answering Viewer questions) and text embedding (vectorizing Chunks for RAG). Using a single provider for both was the simpler option.
 
 ## Decision
-Use Anthropic Claude for generation and Google Gemini `gemini-embedding-2` for embeddings. Embeddings are produced at 768 dimensions via `output_dimensionality=768`; the model auto-normalizes truncated vectors. Gemini is also used for PDF text extraction via document-understanding generation (`gemini-2.0-flash`), which produces cleaner output than local Go PDF libraries for complex layouts.
+Use Anthropic Claude for generation and Google Gemini `gemini-embedding-2` for embeddings. Embeddings are produced at 768 dimensions via `output_dimensionality=768`; the model auto-normalizes truncated vectors. Gemini is also used for PDF text extraction via document-understanding generation (`gemini-3.5-flash`), which produces cleaner output than local Go PDF libraries for complex layouts.
 
 ## Rationale
 1. **Skill demonstration** — using both providers shows breadth of AI platform experience, which is relevant for a system that is itself a portfolio artifact.

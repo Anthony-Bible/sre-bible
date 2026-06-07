@@ -616,6 +616,53 @@ func TestListSources_Empty(t *testing.T) {
 	}
 }
 
+// TestListSources_DescriptionRoundTrips verifies that ListSources returns the stored
+// description for sources that have one, and an empty string for sources without one
+// (NULL column → empty Description field).
+func TestListSources_DescriptionRoundTrips(t *testing.T) {
+	pool, cleanup := testDB(t)
+	defer cleanup()
+
+	store := db.NewSourceStore(pool, slog.Default())
+	chunk := ingest.Chunk{Idx: 0, Content: "x", Embedding: makeEmbedding(5)}
+
+	withDesc := ingest.Source{
+		Name:        "has-desc",
+		Type:        "pdf",
+		Location:    "/has-desc.pdf",
+		Description: "A PDF about Go testing patterns and table-driven tests.",
+	}
+	noDesc := ingest.Source{
+		Name:     "no-desc",
+		Type:     "url",
+		Location: "https://example.com/no-desc",
+		// Description intentionally empty → stored as NULL
+	}
+
+	for _, s := range []ingest.Source{withDesc, noDesc} {
+		if err := store.ReplaceSource(context.Background(), s, []ingest.Chunk{chunk}); err != nil {
+			t.Fatalf("ReplaceSource(%s): %v", s.Name, err)
+		}
+	}
+
+	docs, err := store.ListSources(context.Background())
+	if err != nil {
+		t.Fatalf("ListSources: %v", err)
+	}
+
+	byName := make(map[string]string, len(docs))
+	for _, d := range docs {
+		byName[d.Name] = d.Description
+	}
+
+	if got := byName["has-desc"]; got != withDesc.Description {
+		t.Errorf("has-desc description: got %q, want %q", got, withDesc.Description)
+	}
+	if got := byName["no-desc"]; got != "" {
+		t.Errorf("no-desc description: got %q, want empty string (NULL → empty)", got)
+	}
+}
+
 // TestListSources_ReturnsSortedNameAndType verifies that ListSources returns
 // one entry per source with the correct name and type, ordered by name.
 func TestListSources_ReturnsSortedNameAndType(t *testing.T) {

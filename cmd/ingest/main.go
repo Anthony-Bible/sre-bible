@@ -57,7 +57,7 @@ func run(log *slog.Logger) error {
 	}
 
 	store := db.NewSourceStore(pool, log)
-	pipeline := ingest.NewPipeline(geminiClient, geminiClient, ingest.DefaultURLExtractor{}, store, log)
+	pipeline := ingest.NewPipeline(geminiClient, geminiClient, geminiClient, ingest.DefaultURLExtractor{}, store, log)
 
 	return pipeline.Run(ctx, os.Args[1])
 }

@@ -5,10 +5,11 @@ import "context"
 // Source is a document or URL in the knowledge base.
 // ID is absent — it is a database implementation detail, invisible to the domain.
 type Source struct {
-	Name     string
-	Type     string
-	Location string
-	FullText string // complete extracted text; empty for legacy rows
+	Name        string
+	Type        string
+	Location    string
+	FullText    string // complete extracted text; empty for legacy rows
+	Description string // LLM-generated 1–2 sentence summary; empty for legacy rows
 }
 
 // Chunk is a contiguous text segment with its vector embedding.
