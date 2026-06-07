@@ -67,9 +67,7 @@ func NewServer(pipeline Answerer, sessions SessionRepository, pinger Pinger, log
 		log = slog.Default()
 	}
 
-	t, err := template.New("").Funcs(template.FuncMap{
-		"add": func(a, b int) int { return a + b },
-	}).ParseFS(templateFS, "templates/*.html")
+	t, err := template.New("").ParseFS(templateFS, "templates/*.html")
 	if err != nil {
 		return nil, fmt.Errorf("parse templates: %w", err)
 	}
@@ -85,6 +83,7 @@ func NewServer(pipeline Answerer, sessions SessionRepository, pinger Pinger, log
 	}
 
 	mux.HandleFunc("GET /", s.handleIndex)
+	mux.HandleFunc("GET /messages", s.handleMessages)
 	mux.HandleFunc("POST /chat", s.handleChat)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
