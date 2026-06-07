@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -38,29 +39,33 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 }
 
 type chatData struct {
-	Messages           []renderedMessage
-	ShowSuggestions    bool
 	SuggestedQuestions []string
 }
 
-type renderedMessage struct {
-	Role      string
-	Content   string
-	Citations []string
+// messageDTO is the JSON shape returned by GET /messages.
+type messageDTO struct {
+	Role      string   `json:"role"`
+	Content   string   `json:"content"`
+	Citations []string `json:"citations"`
 }
 
-// handleIndex renders the chat page, loading session history from the cookie.
+// handleIndex renders the chat shell. History is loaded client-side via GET /messages.
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	sid := sessionFromRequest(r)
-	if sid == "" {
-		id, err := newSessionID()
-		if err != nil {
-			s.log.ErrorContext(r.Context(), "generate session ID", slog.Any("err", err))
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		sid = id
-		setSessionCookie(w, sid)
+	data := chatData{
+		SuggestedQuestions: defaultSuggestedQuestions(),
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := s.templates.ExecuteTemplate(w, "index.html", data); err != nil {
+		s.log.ErrorContext(r.Context(), "execute template", slog.Any("err", err))
+	}
+}
+
+// handleMessages returns the message history for a session as JSON.
+func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
+	sid, ok := requireSession(w, r)
+	if !ok {
+		return
 	}
 
 	stored, err := s.sessions.ListMessages(r.Context(), sid)
@@ -70,25 +75,27 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	msgs := make([]renderedMessage, len(stored))
+	dtos := make([]messageDTO, len(stored))
 	for i, sm := range stored {
-		msgs[i] = renderedMessage{
+		citations := sm.Citations
+		if citations == nil {
+			citations = []string{}
+		}
+		dtos[i] = messageDTO{
 			Role:      string(sm.Role),
 			Content:   sm.Content,
-			Citations: sm.Citations,
+			Citations: citations,
 		}
 	}
 
-	data := chatData{
-		Messages:           msgs,
-		ShowSuggestions:    len(stored) == 0,
-		SuggestedQuestions: defaultSuggestedQuestions(),
+	b, err := json.Marshal(dtos)
+	if err != nil {
+		s.log.ErrorContext(r.Context(), "encode messages", slog.Any("err", err))
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
 	}
-
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := s.templates.ExecuteTemplate(w, "index.html", data); err != nil {
-		s.log.ErrorContext(r.Context(), "execute template", slog.Any("err", err))
-	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(b)
 }
 
 // handleChat accepts a question via POST form, streams the RAG answer as SSE,
@@ -99,15 +106,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sid := sessionFromRequest(r)
-	if sid == "" {
-		id, err := newSessionID()
-		if err != nil {
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		sid = id
-		setSessionCookie(w, sid)
+	sid, ok := requireSession(w, r)
+	if !ok {
+		return
 	}
 
 	question := strings.TrimSpace(r.FormValue("question"))

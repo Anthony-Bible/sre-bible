@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -101,17 +102,21 @@ func (nf *nonFlushingWriter) WriteHeader(code int)        { nf.rr.WriteHeader(co
 // Code returns the response status code captured by the inner recorder.
 func (nf *nonFlushingWriter) Code() int { return nf.rr.Code }
 
+// validSessionFixture is a well-formed UUID v4 used across handler tests.
+const validSessionFixture = "aabbccdd-0000-4000-8000-000000000001"
+
 // ---------------------------------------------------------------------------
-// TestHandleIndex_NewVisitor
+// TestHandleIndex
 // ---------------------------------------------------------------------------
 
-// TestHandleIndex_NewVisitor verifies that a GET / request with no session
-// cookie receives a 200 response and has a Set-Cookie header written so the
-// browser can persist the new session ID.
-func TestHandleIndex_NewVisitor(t *testing.T) {
+// TestHandleIndex verifies that GET / renders the chat shell: 200, no Set-Cookie
+// header, and no DB call (ListMessages must not be invoked).
+func TestHandleIndex(t *testing.T) {
 	t.Parallel()
 
-	sessions := &stubSessions{}
+	// A non-nil listErr proves handleIndex does not call ListMessages:
+	// if it did, the handler would propagate the error and return 500.
+	sessions := &stubSessions{listErr: errors.New("db is on fire")}
 	srv := newTestServer(t, &stubPipeline{}, sessions)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -122,65 +127,155 @@ func TestHandleIndex_NewVisitor(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Errorf("status = %d, want %d", rr.Code, http.StatusOK)
 	}
-
-	if rr.Header().Get("Set-Cookie") == "" {
-		t.Error("expected a Set-Cookie header for a new visitor, got none")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// TestHandleIndex_ReturningVisitor
-// ---------------------------------------------------------------------------
-
-// TestHandleIndex_ReturningVisitor verifies that a GET / request that already
-// carries a valid session_id cookie is NOT issued a new Set-Cookie header —
-// the server should leave the existing cookie untouched.
-func TestHandleIndex_ReturningVisitor(t *testing.T) {
-	t.Parallel()
-
-	const existingSession = "aabbccdd-0000-4000-8000-000000000001"
-
-	sessions := &stubSessions{}
-	srv := newTestServer(t, &stubPipeline{}, sessions)
-
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.AddCookie(&http.Cookie{Name: cookieName, Value: existingSession})
-	rr := httptest.NewRecorder()
-
-	srv.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusOK)
-	}
-
 	if rr.Header().Get("Set-Cookie") != "" {
-		t.Errorf("expected no Set-Cookie header for a returning visitor, got: %q", rr.Header().Get("Set-Cookie"))
+		t.Errorf("expected no Set-Cookie header, got %q", rr.Header().Get("Set-Cookie"))
 	}
 }
 
 // ---------------------------------------------------------------------------
-// TestHandleIndex_ListMessagesFails
+// TestHandleMessages_BadSessionID
 // ---------------------------------------------------------------------------
 
-// TestHandleIndex_ListMessagesFails verifies that when the session repository
-// returns an error from ListMessages the handler responds with 500 so the
-// client gets an unambiguous signal that something went wrong rather than an
-// empty or partial page.
-func TestHandleIndex_ListMessagesFails(t *testing.T) {
+// TestHandleMessages_BadSessionID verifies that GET /messages with a missing or
+// malformed X-Session-ID header is rejected with 400 and does not touch the DB.
+func TestHandleMessages_BadSessionID(t *testing.T) {
+	t.Parallel()
+
+	// Setting listErr proves no DB call occurred: a 400 (not 500) confirms it.
+	sessions := &stubSessions{listErr: errors.New("should not be called")}
+	srv := newTestServer(t, &stubPipeline{}, sessions)
+
+	cases := []struct {
+		name   string
+		header string
+	}{
+		{"missing", ""},
+		{"plain string", "not-a-uuid"},
+		{"wrong version nibble", "aabbccdd-0000-3000-8000-000000000001"},
+		{"uppercase", "AABBCCDD-0000-4000-8000-000000000001"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			req := httptest.NewRequest(http.MethodGet, "/messages", nil)
+			if tc.header != "" {
+				req.Header.Set(sessionHeader, tc.header)
+			}
+			rr := httptest.NewRecorder()
+			srv.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestHandleMessages_HappyPath
+// ---------------------------------------------------------------------------
+
+// TestHandleMessages_HappyPath verifies that GET /messages returns a JSON array
+// of messages with nil citations normalised to [] and existing citations preserved.
+func TestHandleMessages_HappyPath(t *testing.T) {
 	t.Parallel()
 
 	sessions := &stubSessions{
-		listErr: errors.New("db is on fire"),
+		messages: []StoredMessage{
+			{Message: rag.Message{Role: rag.RoleUser, Content: "hi"}, Citations: nil},
+			{Message: rag.Message{Role: rag.RoleAssistant, Content: "hello"}, Citations: []string{"a.pdf"}},
+		},
 	}
 	srv := newTestServer(t, &stubPipeline{}, sessions)
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/messages", nil)
+	req.Header.Set(sessionHeader, validSessionFixture)
+	rr := httptest.NewRecorder()
+
+	srv.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+
+	var msgs []messageDTO
+	if err := json.NewDecoder(rr.Body).Decode(&msgs); err != nil {
+		t.Fatalf("decode response body: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("got %d messages, want 2", len(msgs))
+	}
+
+	// User turn: nil citations must be normalised to an empty slice, not JSON null.
+	if msgs[0].Role != "user" || msgs[0].Content != "hi" {
+		t.Errorf("msgs[0] = {%q, %q}, want {user, hi}", msgs[0].Role, msgs[0].Content)
+	}
+	if msgs[0].Citations == nil {
+		t.Error("user citations must be normalised to [], got nil")
+	}
+
+	// Assistant turn: citations preserved.
+	if msgs[1].Role != "assistant" || msgs[1].Content != "hello" {
+		t.Errorf("msgs[1] = {%q, %q}, want {assistant, hello}", msgs[1].Role, msgs[1].Content)
+	}
+	if len(msgs[1].Citations) != 1 || msgs[1].Citations[0] != "a.pdf" {
+		t.Errorf("msgs[1].Citations = %v, want [a.pdf]", msgs[1].Citations)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestHandleMessages_ListMessagesFails
+// ---------------------------------------------------------------------------
+
+// TestHandleMessages_ListMessagesFails verifies that when ListMessages errors the
+// handler responds 500 so the client receives an unambiguous failure signal.
+func TestHandleMessages_ListMessagesFails(t *testing.T) {
+	t.Parallel()
+
+	sessions := &stubSessions{listErr: errors.New("db is on fire")}
+	srv := newTestServer(t, &stubPipeline{}, sessions)
+
+	req := httptest.NewRequest(http.MethodGet, "/messages", nil)
+	req.Header.Set(sessionHeader, validSessionFixture)
 	rr := httptest.NewRecorder()
 
 	srv.ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want %d", rr.Code, http.StatusInternalServerError)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestHandleChat_BadSessionID
+// ---------------------------------------------------------------------------
+
+// TestHandleChat_BadSessionID verifies that POST /chat with a malformed
+// X-Session-ID is rejected with 400 before any DB call is made.
+func TestHandleChat_BadSessionID(t *testing.T) {
+	t.Parallel()
+
+	sessions := &stubSessions{}
+	srv := newTestServer(t, &stubPipeline{}, sessions)
+
+	form := url.Values{}
+	form.Set("question", "will this work?")
+	req := httptest.NewRequest(http.MethodPost, "/chat", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set(sessionHeader, "not-a-uuid")
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+	}
+	if len(sessions.appended) != 0 {
+		t.Errorf("AppendMessage called %d time(s), want 0 for bad session ID", len(sessions.appended))
 	}
 }
 
@@ -202,9 +297,7 @@ func TestHandleChat_EmptyQuestion(t *testing.T) {
 	form.Set("question", "   ") // whitespace only — TrimSpace makes it blank
 	req := httptest.NewRequest(http.MethodPost, "/chat", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	// Give it an existing session cookie so CreateSession/ListMessages are not
-	// the reason we get a 400 — the empty question guard must fire first.
-	req.AddCookie(&http.Cookie{Name: cookieName, Value: "aabbccdd-0000-4000-8000-000000000002"})
+	req.Header.Set(sessionHeader, "aabbccdd-0000-4000-8000-000000000002")
 
 	rr := httptest.NewRecorder()
 	srv.ServeHTTP(rr, req)
@@ -223,13 +316,7 @@ func TestHandleChat_EmptyQuestion(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestHandleChat_NoFlusher verifies that when the underlying ResponseWriter
-// does not implement http.Flusher the handler responds with 500.  SSE
-// requires flushing; a non-flushing writer would produce a broken stream, so
-// the server must refuse the request rather than silently produce garbage.
-//
-// Note: httptest.ResponseRecorder gained http.Flusher in Go 1.22, so we use
-// nonFlushingWriter — a thin wrapper that hides the Flush method — to
-// exercise this code path.
+// does not implement http.Flusher the handler responds with 500.
 func TestHandleChat_NoFlusher(t *testing.T) {
 	t.Parallel()
 
@@ -240,7 +327,7 @@ func TestHandleChat_NoFlusher(t *testing.T) {
 	form.Set("question", "will this work?")
 	req := httptest.NewRequest(http.MethodPost, "/chat", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(&http.Cookie{Name: cookieName, Value: "aabbccdd-0000-4000-8000-000000000003"})
+	req.Header.Set(sessionHeader, "aabbccdd-0000-4000-8000-000000000003")
 
 	// nonFlushingWriter explicitly does not satisfy http.Flusher.
 	nfw := &nonFlushingWriter{rr: httptest.NewRecorder()}
@@ -256,12 +343,9 @@ func TestHandleChat_NoFlusher(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestHandleChat_HappyPath verifies the full SSE happy path end-to-end:
-//   - the response body contains at least one "event: token" frame for each
-//     token emitted by the pipeline,
-//   - the response body contains an "event: done" frame that includes the
-//     citation source name, and
-//   - both the user and the assistant turns are persisted via AppendMessage
-//     (two calls: first for the user question, second for the assistant reply).
+//   - the response body contains at least one "event: token" frame,
+//   - the response body contains an "event: done" frame with the citation, and
+//   - both user and assistant turns are persisted via AppendMessage.
 func TestHandleChat_HappyPath(t *testing.T) {
 	t.Parallel()
 
@@ -276,7 +360,7 @@ func TestHandleChat_HappyPath(t *testing.T) {
 	form.Set("question", "what is SRE?")
 	req := httptest.NewRequest(http.MethodPost, "/chat", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(&http.Cookie{Name: cookieName, Value: "aabbccdd-0000-4000-8000-000000000004"})
+	req.Header.Set(sessionHeader, "aabbccdd-0000-4000-8000-000000000004")
 
 	tf := newTestFlusher()
 	srv.ServeHTTP(tf, req)
@@ -329,9 +413,8 @@ func TestHandleChat_HappyPath(t *testing.T) {
 // TestHandleChat_StatusEventForwarded
 // ---------------------------------------------------------------------------
 
-// TestHandleChat_StatusEventForwarded verifies that when the pipeline emits a
-// status message via onStatus, a "event: status" SSE frame is written to the
-// response before the token frames.
+// TestHandleChat_StatusEventForwarded verifies that pipeline status messages
+// are forwarded as "event: status" SSE frames before the token frames.
 func TestHandleChat_StatusEventForwarded(t *testing.T) {
 	t.Parallel()
 
@@ -347,7 +430,7 @@ func TestHandleChat_StatusEventForwarded(t *testing.T) {
 	form.Set("question", "what is anthony's work history?")
 	req := httptest.NewRequest(http.MethodPost, "/chat", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(&http.Cookie{Name: cookieName, Value: "aabbccdd-0000-4000-8000-000000000007"})
+	req.Header.Set(sessionHeader, "aabbccdd-0000-4000-8000-000000000007")
 
 	tf := newTestFlusher()
 	srv.ServeHTTP(tf, req)
@@ -372,10 +455,8 @@ func TestHandleChat_StatusEventForwarded(t *testing.T) {
 // TestHandleChat_CreateSessionFails
 // ---------------------------------------------------------------------------
 
-// TestHandleChat_CreateSessionFails verifies that when CreateSession returns
-// an error the handler emits an "event: error" SSE frame rather than silently
-// continuing — the client must always receive an unambiguous error signal when
-// session initialisation fails.
+// TestHandleChat_CreateSessionFails verifies that when CreateSession returns an
+// error the handler emits an "event: error" SSE frame.
 func TestHandleChat_CreateSessionFails(t *testing.T) {
 	t.Parallel()
 
@@ -388,7 +469,7 @@ func TestHandleChat_CreateSessionFails(t *testing.T) {
 	form.Set("question", "will session creation fail?")
 	req := httptest.NewRequest(http.MethodPost, "/chat", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(&http.Cookie{Name: cookieName, Value: "aabbccdd-0000-4000-8000-000000000005"})
+	req.Header.Set(sessionHeader, "aabbccdd-0000-4000-8000-000000000005")
 
 	tf := newTestFlusher()
 	srv.ServeHTTP(tf, req)

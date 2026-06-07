@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SRE Bible — Anthony Bible</title>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify/dist/purify.min.js"></script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -233,31 +234,13 @@
 
     <div id="chat-container">
         <div id="chat-log">
-            {{range .Messages}}
-            <div class="message {{.Role}}">
-                {{if eq .Role "user"}}
-                <div class="msg-body">{{.Content}}</div>
-                {{else}}
-                <div class="msg-body" data-content="{{.Content}}"></div>
-                {{if .Citations}}
-                <div class="citations">
-                    {{range $i, $c := .Citations}}
-                    <span class="citation">[{{add $i 1}}] {{$c}}</span>
-                    {{end}}
-                </div>
-                {{end}}
-                {{end}}
-            </div>
-            {{end}}
         </div>
 
-        {{if .ShowSuggestions}}
         <div id="suggestions">
             {{range .SuggestedQuestions}}
             <button onclick="submitQuestion(this.textContent)">{{.}}</button>
             {{end}}
         </div>
-        {{end}}
 
         <div id="status-indicator"></div>
 
@@ -278,11 +261,34 @@
     <script>
         marked.setOptions({ breaks: true, gfm: true });
 
+        function safeMarkdown(text) {
+            return DOMPurify.sanitize(marked.parse(text));
+        }
+
+        function getSessionId() {
+            let id = sessionStorage.getItem('sre_session_id');
+            if (!id) { id = crypto.randomUUID(); sessionStorage.setItem('sre_session_id', id); }
+            return id;
+        }
+
+        async function restoreHistory() {
+            let resp;
+            try { resp = await fetch('/messages', { headers: { 'X-Session-Id': getSessionId() } }); }
+            catch { return; }
+            if (!resp.ok) return;
+            const msgs = await resp.json();
+            if (!Array.isArray(msgs) || msgs.length === 0) return;
+            document.getElementById('suggestions')?.remove();
+            for (const m of msgs) {
+                try {
+                    if (m.role === 'user') appendUserBubble(m.content);
+                    else finalizeStreamingBubble(m.content, m.citations || []);
+                } catch (_) { /* skip corrupt message, continue restoring rest */ }
+            }
+        }
+
         document.addEventListener('DOMContentLoaded', () => {
-            document.querySelectorAll('.msg-body[data-content]').forEach(el => {
-                el.innerHTML = marked.parse(el.dataset.content);
-            });
-            scrollToBottom();
+            restoreHistory();
 
             const textarea = document.getElementById('question-input');
             textarea.addEventListener('input', autoResize);
@@ -355,7 +361,7 @@
             const div = document.createElement('div');
             div.className = 'message assistant';
 
-            let inner = `<div class="msg-body">${marked.parse(text)}</div>`;
+            let inner = `<div class="msg-body">${safeMarkdown(text)}</div>`;
             if (citations && citations.length > 0) {
                 const cHtml = citations.map((c, i) =>
                     `<span class="citation">[${i + 1}] ${escapeHTML(c)}</span>`
@@ -401,7 +407,10 @@
             try {
                 resp = await fetch('/chat', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                        'X-Session-Id': getSessionId(),
+                    },
                     body: new URLSearchParams({ question: q }),
                 });
             } catch (err) {
@@ -435,7 +444,7 @@
                         if (event === 'token') {
                             clearStatus();
                             accum += JSON.parse(data).t;
-                            updateStreamingBubble(marked.parse(accum));
+                            updateStreamingBubble(safeMarkdown(accum));
                         } else if (event === 'status') {
                             showStatus(JSON.parse(data).msg);
                         } else if (event === 'done') {
