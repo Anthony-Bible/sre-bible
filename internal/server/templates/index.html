@@ -485,7 +485,10 @@
         // renderLiveTrace repaints the live streaming trace panel from currentTrace.
         function renderLiveTrace() {
             const panel = document.getElementById('streaming-trace');
-            panel.style.display = '';
+            // Explicit 'block' (not '') — clearing the inline style would fall back to the
+            // stylesheet's `#streaming-trace { display: none }` rule and keep the live panel
+            // hidden for the whole answer. An inline value overrides that rule.
+            panel.style.display = 'block';
             panel.open = true;
             document.getElementById('streaming-trace-summary').textContent = traceSummary(currentTrace);
             document.getElementById('streaming-trace-steps').innerHTML =
