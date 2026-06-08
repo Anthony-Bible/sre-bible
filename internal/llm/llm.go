@@ -71,24 +71,26 @@ const (
 
 // Client wraps the Anthropic SDK and satisfies rag.Generator.
 type Client struct {
-	inner        *anthropic.Client
-	model        string
-	systemPrompt string
-	log          *slog.Logger
+	inner            *anthropic.Client
+	model            string
+	baseSystemPrompt string
+	personas         map[rag.PersonaMode]string
+	log              *slog.Logger
 }
 
 // NewClient creates an Anthropic Claude streaming client.
-// systemPrompt is sent on every call; model is e.g. "claude-haiku-4-5-20251001".
-func NewClient(apiKey, model, systemPrompt string, log *slog.Logger) *Client {
+// baseSystemPrompt and personas are used to construct the system prompt dynamically on each call.
+func NewClient(apiKey, model, baseSystemPrompt string, personas map[rag.PersonaMode]string, log *slog.Logger) *Client {
 	if log == nil {
 		log = slog.Default()
 	}
 	c := anthropic.NewClient(option.WithAPIKey(apiKey))
 	return &Client{
-		inner:        &c,
-		model:        model,
-		systemPrompt: systemPrompt,
-		log:          log,
+		inner:            &c,
+		model:            model,
+		baseSystemPrompt: baseSystemPrompt,
+		personas:         personas,
+		log:              log,
 	}
 }
 
@@ -117,10 +119,26 @@ func (c *Client) StreamAnswer(ctx context.Context, messages []rag.Message, tools
 	var fetchedNames []string
 
 	for round := 0; round <= maxToolRounds; round++ {
+		mode := rag.PersonaModeFromContext(ctx)
+		var personaText string
+		if c.personas != nil {
+			personaText = c.personas[mode]
+			if personaText == "" {
+				personaText = c.personas[rag.ModeStandard]
+			}
+		}
+
+		systemBlocks := []anthropic.TextBlockParam{
+			{Text: c.baseSystemPrompt},
+		}
+		if personaText != "" {
+			systemBlocks = append(systemBlocks, anthropic.TextBlockParam{Text: personaText})
+		}
+
 		reqParams := anthropic.MessageNewParams{
 			Model:     c.model,
 			MaxTokens: 2048,
-			System:    []anthropic.TextBlockParam{{Text: c.systemPrompt}},
+			System:    systemBlocks,
 			Messages:  params,
 		}
 		if len(toolParams) > 0 {

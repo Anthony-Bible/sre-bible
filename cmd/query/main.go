@@ -63,7 +63,11 @@ func run(log *slog.Logger) error {
 	}
 
 	store := db.NewSourceStore(pool, log)
-	llmCli := llm.NewClient(anthropicKey, "claude-haiku-4-5", rag.SystemPrompt, log)
+	personas := map[rag.PersonaMode]string{
+		rag.ModeStandard: rag.StandardPersona,
+		rag.ModeDeadpool: rag.DeadpoolPersona,
+	}
+	llmCli := llm.NewClient(anthropicKey, "claude-haiku-4-5", rag.BaseSystemPrompt, personas, log)
 	matcher := rag.NewMatcher(gemCli, store)
 	pipe := rag.NewPipeline(gemCli, store, llmCli, store, store, matcher, nil, 0, log)
 

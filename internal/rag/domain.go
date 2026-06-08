@@ -6,6 +6,36 @@ import (
 	"github.com/Anthony-Bible/sre-bible/internal/email"
 )
 
+// PersonaMode discriminates between standard and Deadpool persona voices.
+type PersonaMode string
+
+const (
+	ModeStandard PersonaMode = "standard"
+	ModeDeadpool PersonaMode = "deadpool"
+)
+
+type contextKey string
+
+const (
+	personaModeKey contextKey = "persona_mode"
+)
+
+// WithPersonaMode returns a new context carrying the specified PersonaMode.
+func WithPersonaMode(ctx context.Context, mode PersonaMode) context.Context {
+	return context.WithValue(ctx, personaModeKey, mode)
+}
+
+// PersonaModeFromContext extracts the PersonaMode from the context, defaulting to ModeStandard if not present or invalid.
+func PersonaModeFromContext(ctx context.Context) PersonaMode {
+	if v, ok := ctx.Value(personaModeKey).(PersonaMode); ok {
+		switch v {
+		case ModeStandard, ModeDeadpool:
+			return v
+		}
+	}
+	return ModeStandard
+}
+
 // EmailSender sends a single contact email on a Viewer's behalf.
 // ok=false + reason = expected, user-relayable refusal (rate limit, validation,
 // already sent, delivery failure). err != nil = internal failure (never shown raw).

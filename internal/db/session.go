@@ -141,3 +141,32 @@ func (s *SessionStore) MarkSessionVerified(ctx context.Context, sessionID string
 	}
 	return nil
 }
+
+// SetDeadpoolMode sets the deadpool_mode column for the given session.
+func (s *SessionStore) SetDeadpoolMode(ctx context.Context, sessionID string, enabled bool) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE sessions SET deadpool_mode = $1 WHERE id = $2`,
+		enabled, sessionID,
+	)
+	if err != nil {
+		return fmt.Errorf("set deadpool mode: %w", err)
+	}
+	return nil
+}
+
+// IsDeadpoolMode returns true if the session is currently in Deadpool Mode.
+// Returns (false, nil) if the session does not exist.
+func (s *SessionStore) IsDeadpoolMode(ctx context.Context, sessionID string) (bool, error) {
+	var enabled bool
+	err := s.pool.QueryRow(ctx,
+		`SELECT deadpool_mode FROM sessions WHERE id = $1`,
+		sessionID,
+	).Scan(&enabled)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("is deadpool mode: %w", err)
+	}
+	return enabled, nil
+}

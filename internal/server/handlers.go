@@ -64,6 +64,39 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// resolvePersonaMode extracts the Deadpool Mode header/query preference, updates the DB if needed, and returns the updated context carrying the PersonaMode.
+func (s *Server) resolvePersonaMode(ctx context.Context, sid string, r *http.Request) context.Context {
+	isDeadpool, err := s.sessions.IsDeadpoolMode(ctx, sid)
+	if err != nil {
+		s.log.ErrorContext(ctx, "check deadpool mode", slog.Any("err", err), slog.String("session", sid))
+	}
+
+	headerVal := r.Header.Get("X-Deadpool-Mode")
+	queryVal := r.URL.Query().Get("mode")
+
+	shouldBeDeadpool := isDeadpool
+	hasPreference := false
+	if headerVal == "true" || queryVal == "deadpool" {
+		shouldBeDeadpool = true
+		hasPreference = true
+	} else if headerVal == "false" || queryVal == "normal" {
+		shouldBeDeadpool = false
+		hasPreference = true
+	}
+
+	if hasPreference && shouldBeDeadpool != isDeadpool {
+		if err := s.sessions.SetDeadpoolMode(ctx, sid, shouldBeDeadpool); err != nil {
+			s.log.ErrorContext(ctx, "failed to update deadpool mode in DB", slog.Any("err", err), slog.Bool("enabled", shouldBeDeadpool))
+		}
+		isDeadpool = shouldBeDeadpool
+	}
+
+	if isDeadpool {
+		return rag.WithPersonaMode(ctx, rag.ModeDeadpool)
+	}
+	return rag.WithPersonaMode(ctx, rag.ModeStandard)
+}
+
 // handleMessages returns the message history for a session as JSON.
 func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	sid, ok := requireSession(w, r)
@@ -71,7 +104,9 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stored, err := s.sessions.ListMessages(r.Context(), sid)
+	ctx := s.resolvePersonaMode(r.Context(), sid, r)
+
+	stored, err := s.sessions.ListMessages(ctx, sid)
 	if err != nil {
 		s.log.ErrorContext(r.Context(), "list messages", slog.Any("err", err), slog.String("session", sid))
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -125,7 +160,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx := r.Context()
+	ctx := s.resolvePersonaMode(r.Context(), sid, r)
 
 	if err := s.sessions.CreateSession(ctx, sid); err != nil {
 		s.log.ErrorContext(ctx, "create session", slog.Any("err", err), slog.String("session", sid))

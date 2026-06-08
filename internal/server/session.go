@@ -2,11 +2,12 @@ package server
 
 import (
 	"net/http"
-
-	"github.com/google/uuid"
+	"regexp"
 )
 
 const sessionHeader = "X-Session-Id"
+
+var uuidV4Re = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
 // sessionFromRequest returns the session ID from the X-Session-Id header, or "" if absent.
 func sessionFromRequest(r *http.Request) string {
@@ -15,8 +16,7 @@ func sessionFromRequest(r *http.Request) string {
 
 // validSessionID reports whether id is a valid UUID.
 func validSessionID(id string) bool {
-	_, err := uuid.Parse(id)
-	return err == nil
+	return uuidV4Re.MatchString(id)
 }
 
 // requireSession extracts and validates the session ID from the request.
