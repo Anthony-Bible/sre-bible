@@ -64,7 +64,8 @@ func run(log *slog.Logger) error {
 
 	store := db.NewSourceStore(pool, log)
 	llmCli := llm.NewClient(anthropicKey, "claude-haiku-4-5", rag.SystemPrompt, log)
-	pipe := rag.NewPipeline(gemCli, store, llmCli, store, store, nil, 0, log)
+	matcher := rag.NewMatcher(gemCli, store)
+	pipe := rag.NewPipeline(gemCli, store, llmCli, store, store, matcher, nil, 0, log)
 
 	onTrace := func(step rag.TraceStep) error {
 		_, err := fmt.Fprintf(os.Stderr, "[trace] %s\n", traceSummary(step))

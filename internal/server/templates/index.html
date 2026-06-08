@@ -109,6 +109,24 @@
         .message.assistant .msg-body pre code { background: none; padding: 0; color: inherit; }
         .message.assistant .msg-body strong { font-weight: 700; }
 
+        /* Fit Scorecard tables — wrapper scrolls instead of overflowing on mobile */
+        .message.assistant .msg-body table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 0.5rem 0;
+            font-size: 0.875em;
+            display: block;
+            overflow-x: auto;
+        }
+        .message.assistant .msg-body th,
+        .message.assistant .msg-body td {
+            border: 1px solid #e2e8f0;
+            padding: 0.4rem 0.6rem;
+            text-align: left;
+            vertical-align: top;
+        }
+        .message.assistant .msg-body th { background: #f1f5f9; font-weight: 700; }
+
         .citations {
             display: flex;
             flex-wrap: wrap;

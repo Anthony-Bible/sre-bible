@@ -48,7 +48,7 @@ A short LLM-generated summary (1–2 sentences, ≤ ~40 words) of a Source's con
 The complete Gemini-extracted markdown of a Source, stored in the `sources.full_text` column at ingestion time. Used by the Resume Agent when retrieved Chunks are insufficient to answer a question — see Tool and Escalation. Nullable: legacy rows ingested before this column existed have `full_text = NULL` and degrade gracefully.
 
 ### Tool
-A capability the Resume Agent's model may invoke during answer generation, beyond the initial chunk context. Three tools exist: `list_documents` (returns all Source names and types), `fetch_full_document` (returns the Full Text of a named Source), and `send_contact_email` (delivers a Viewer-composed message to the Owner via AWS SES — see Contact Email). Tools are defined in `internal/llm` and exposed to the model via the Anthropic tool-use API. The tool loop is capped at 5 rounds.
+A capability the Resume Agent's model may invoke during answer generation, beyond the initial chunk context. Four tools exist: `list_documents` (returns all Source names and types), `fetch_full_document` (returns the Full Text of a named Source), `match_job_description` (retrieves per-Requirement evidence to build a Fit Scorecard — see Fit Scorecard), and `send_contact_email` (delivers a Viewer-composed message to the Owner via AWS SES — see Contact Email). Tools are defined in `internal/llm` and exposed to the model via the Anthropic tool-use API. The tool loop is capped at 5 rounds.
 
 ### Escalation
 The act of the Resume Agent fetching a Source's Full Text when the initially retrieved Chunks are insufficient to answer a Viewer's question. Escalation is model-driven — the Resume Agent decides when Chunks are inadequate and calls the appropriate Tool. Each Escalation is recorded as a `tool_call` Trace Step in the persisted Agent Trace, so it remains visible after reload and to the Owner for analytics.
@@ -57,7 +57,19 @@ The act of the Resume Agent fetching a Source's Full Text when the initially ret
 The persisted, ordered record of the steps the Resume Agent took to produce a single assistant Message — retrieval, any Tool calls (Escalations), and the final answer. Stored per Message in the `messages.trace` JSONB column and returned by the message-history API, so it survives reload. Displayed as a collapsible per-Message timeline in the chat UI (auto-expanded while streaming, collapsed to a one-line summary once the answer completes). Recorded with a strict allow-list of safe data — curated step labels plus document names and counts — and never the system prompt, internal prompts, raw tool payloads, or any Contact Email content.
 
 ### Trace Step
-A single entry in an Agent Trace. Each Step has a kind — `retrieval` (the Chunk search: how many Chunks from how many Sources, plus the Grounding Excerpts), `tool_call` (one Tool invocation: tool name, safe target document name, and outcome), or `answer` (the final composition: number of tool rounds and duration) — and a human-readable label. A `send_contact_email` Tool call is recorded with a generic label and no target, never the message details.
+A single entry in an Agent Trace. Each Step has a kind — `retrieval` (the Chunk search: how many Chunks from how many Sources, plus the Grounding Excerpts), `tool_call` (one Tool invocation: tool name, safe target document name, and outcome), or `answer` (the final composition: number of tool rounds and duration) — and a human-readable label. A `send_contact_email` Tool call is recorded with a generic label and no target, never the message details. A `match_job_description` Tool call is likewise recorded with a generic label and no target, never the Viewer's pasted requirement text.
 
 ### Grounding Excerpt
 The exact text of a retrieved Chunk, paired with its Source name, carried in the `retrieval` Trace Step. Grounding Excerpts are what a Citation reveals when clicked, letting a Viewer see the precise source passage an answer was drawn from. They contain the same Chunk text already sent to the model and are rendered as plain text (never interpreted as markup).
+
+### Job Description (JD)
+A recruiter-supplied document describing a role, pasted into the chat by a Viewer. A JD is Viewer-volunteered Message content — not an ingested Source — and persists in session history like any other Viewer message. The Resume Agent decomposes a JD into its distinct Requirements during normal reasoning, not via a separate tool call.
+
+### Requirement
+A single discrete expectation extracted from a Job Description by the Resume Agent (e.g. "5+ years operating Kubernetes in production"). Requirements are the unit of per-Requirement Retrieval performed by the `match_job_description` Tool.
+
+### Match class
+One of **Strong**, **Partial**, or **Gap**, assigned by the Resume Agent to each Requirement based on the evidence retrieved for it. **Strong** = clear, directly cited evidence; **Partial** = related but incomplete cited evidence; **Gap** = no corpus evidence. A Gap is worded neutrally ("No supporting evidence in Anthony's documented background") and makes no claim either way about whether the Owner has the skill.
+
+### Fit Scorecard
+The structured assistant output produced when a Viewer pastes a Job Description: a GitHub-flavored Markdown table mapping each Requirement to a Match class and cited evidence, followed by an overall fit summary. When any Gap exists, the Resume Agent invites the Viewer to contact the Owner directly (via the `send_contact_email` Tool). The `match_job_description` Tool supplies the grounded evidence; the model performs the decomposition, classification, and synthesis.

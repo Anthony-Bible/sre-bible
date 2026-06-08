@@ -69,7 +69,7 @@ func defaultSuggestedQuestions() []string {
 	return []string{
 		"What are Anthony's biggest reliability wins?",
 		"How does Anthony approach on-call culture and incident response?",
-		"What infrastructure tooling and cloud platforms has Anthony used?",
+		"Paste a job description and I'll show how Anthony matches it",
 		"What is Anthony looking for in his next role?",
 		"I'd like to get in touch with Anthony",
 	}
