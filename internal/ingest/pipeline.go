@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -121,6 +122,12 @@ func (p *Pipeline) extractText(ctx context.Context, srcType, location string) (s
 		return p.pdfExtractor.ExtractPDFText(ctx, location)
 	case "url":
 		return p.urlExtractor.ExtractURL(ctx, location)
+	case "text":
+		data, err := os.ReadFile(location)
+		if err != nil {
+			return "", fmt.Errorf("read text file: %w", err)
+		}
+		return string(data), nil
 	default:
 		return "", fmt.Errorf("unknown source type: %s", srcType)
 	}

@@ -12,7 +12,7 @@ import (
 )
 
 // DeriveSourceName returns the canonical citation name and source type for a location.
-// URLs return (full URL, "url"); file paths return (basename, "pdf").
+// URLs return (full URL, "url"); .txt files return (basename, "text"); other file paths return (basename, "pdf").
 func DeriveSourceName(location string) (string, string, error) {
 	if strings.HasPrefix(location, "http://") || strings.HasPrefix(location, "https://") {
 		if _, err := url.Parse(location); err != nil {
@@ -20,7 +20,11 @@ func DeriveSourceName(location string) (string, string, error) {
 		}
 		return location, "url", nil
 	}
-	return filepath.Base(location), "pdf", nil
+	base := filepath.Base(location)
+	if strings.EqualFold(filepath.Ext(base), ".txt") {
+		return base, "text", nil
+	}
+	return base, "pdf", nil
 }
 
 // ExtractURL fetches a web page and returns its main text content.

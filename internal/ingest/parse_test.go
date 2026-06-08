@@ -48,13 +48,14 @@ func assertDeriveSourceName(t *testing.T, tc deriveSourceNameCase) {
 	}
 }
 
-// TestDeriveSourceName exercises the five observable contracts of DeriveSourceName:
+// TestDeriveSourceName exercises the observable contracts of DeriveSourceName:
 //
 //  1. HTTP URL  → (full URL string, "url", nil)
 //  2. HTTPS URL → (full URL string, "url", nil)
-//  3. Plain file path (no directories) → (basename, "pdf", nil)
-//  4. File path with directory segments → (basename only, "pdf", nil)
-//  5. URL whose scheme prefix is http/https but whose body is unparseable
+//  3. .txt file path → (basename, "text", nil)
+//  4. PDF / other file path (no directories) → (basename, "pdf", nil)
+//  5. File path with directory segments → (basename only, inferred type, nil)
+//  6. URL whose scheme prefix is http/https but whose body is unparseable
 //     → ("", "", non-nil error)
 func TestDeriveSourceName(t *testing.T) {
 	t.Parallel()
@@ -88,14 +89,27 @@ func TestDeriveSourceName(t *testing.T) {
 			wantName: "https://example.com/",
 			wantType: "url",
 		},
-		// Contract 3: Plain filename — name must be the basename, type must be "pdf".
+		// Contract 3: .txt file — name must be basename, type must be "text".
 		{
-			name:     "plain filename with no directories returns basename and type pdf",
+			name:     "plain txt filename returns basename and type text",
+			location: "brag-doc.txt",
+			wantName: "brag-doc.txt",
+			wantType: "text",
+		},
+		{
+			name:     "absolute path to txt file returns basename and type text",
+			location: "/some/dir/notes.txt",
+			wantName: "notes.txt",
+			wantType: "text",
+		},
+		// Contract 4: PDF filename — name must be the basename, type must be "pdf".
+		{
+			name:     "plain pdf filename returns basename and type pdf",
 			location: "resume.pdf",
 			wantName: "resume.pdf",
 			wantType: "pdf",
 		},
-		// Contract 3 variant: extensionless filename is still a file path.
+		// Contract 4 variant: extensionless filename defaults to pdf.
 		{
 			name:     "extensionless filename returns basename and type pdf",
 			location: "runbook",
