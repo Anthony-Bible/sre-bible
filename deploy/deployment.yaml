@@ -34,7 +34,7 @@ spec:
             runAsNonRoot: true
       containers:
         - name: sre-bible
-          image: ghcr.io/anthony-bible/sre-bible@sha256:bfebe488613846b81048de91081898af0c7d7ead30003f5da88b2279e5ebee13
+          image: ghcr.io/anthony-bible/sre-bible@sha256:bce7ccb9de25eeac98d882be1ca8e5f8a23f37ce48a2eb3917375e91b17877f3
           ports:
             - name: http
               containerPort: 8080
