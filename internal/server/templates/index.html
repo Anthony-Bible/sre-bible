@@ -572,9 +572,8 @@
             div.innerHTML = inner;
             log.appendChild(div);
 
-            if (citations && citations.length > 0) {
-                wireCitations(div, groupExcerpts(trace));
-            }
+            // wireCitations self-guards — it no-ops when the message has no citation pills.
+            wireCitations(div, groupExcerpts(trace));
 
             scrollToBottom();
             document.getElementById('send-btn').disabled = false;

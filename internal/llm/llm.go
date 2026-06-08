@@ -140,15 +140,21 @@ func (c *Client) StreamAnswer(ctx context.Context, messages []rag.Message, tools
 	return fetchedNames, nil
 }
 
-// emitAnswerStep emits the terminal answer TraceStep. toolRounds is the number of tool
-// rounds that ran; start anchors the wall-clock duration. A nil onTrace is a no-op, and
-// a callback error is intentionally swallowed: the answer is already produced, the trace
-// is accumulated independently by the caller, and a failed transient write must not abort.
-func emitAnswerStep(onTrace func(rag.TraceStep) error, toolRounds int, start time.Time) {
+// emitTrace delivers one TraceStep to onTrace on a best-effort basis. A nil onTrace is a
+// no-op, and a callback error is intentionally swallowed: the step is observability only,
+// the caller accumulates the trace independently, and a failed transient write (e.g. a
+// disconnected client) must never abort generation.
+func emitTrace(onTrace func(rag.TraceStep) error, step rag.TraceStep) {
 	if onTrace == nil {
 		return
 	}
-	_ = onTrace(rag.TraceStep{
+	_ = onTrace(step)
+}
+
+// emitAnswerStep emits the terminal answer TraceStep. toolRounds is the number of tool
+// rounds that ran; start anchors the wall-clock duration.
+func emitAnswerStep(onTrace func(rag.TraceStep) error, toolRounds int, start time.Time) {
+	emitTrace(onTrace, rag.TraceStep{
 		Kind:  rag.TraceKindAnswer,
 		Label: "Composed answer",
 		Answer: &rag.AnswerDetail{
@@ -203,18 +209,13 @@ func (c *Client) collectToolResults(ctx context.Context, round int, acc anthropi
 	return results, fetchedNames
 }
 
-// emitToolCall emits a tool_call TraceStep. A nil onTrace is a no-op, and a callback
-// error is intentionally swallowed: the tool has already run, the trace is accumulated
-// independently by the caller, and a failed transient write must not abort generation.
+// emitToolCall emits a tool_call TraceStep.
 //
 // PII rule: callers pass curated, PII-free labels and SAFE targets (document names only).
 // For send_contact_email, target is always "" — the Viewer's email, draft, and reason
 // are never passed here.
 func emitToolCall(onTrace func(rag.TraceStep) error, label, tool, target, outcome string) {
-	if onTrace == nil {
-		return
-	}
-	_ = onTrace(rag.TraceStep{
+	emitTrace(onTrace, rag.TraceStep{
 		Kind:  rag.TraceKindToolCall,
 		Label: label,
 		ToolCall: &rag.ToolCallDetail{

@@ -67,10 +67,10 @@ func (p *Pipeline) Answer(ctx context.Context, sessionID string, history []Messa
 	// Emit the retrieval step on BOTH paths — before the zero-chunk branch — so it
 	// fires even on early return. This is the only place chunk Content is available
 	// before BuildUserMessage consumes it, so the grounding excerpts are captured here.
+	// Trace emission is best-effort: a failed transient write must not abort the answer
+	// (cancellation is handled via ctx, token streaming via onToken).
 	if onTrace != nil {
-		if err := onTrace(buildRetrievalStep(chunks)); err != nil {
-			return nil, err
-		}
+		_ = onTrace(buildRetrievalStep(chunks))
 	}
 
 	if len(chunks) == 0 {
