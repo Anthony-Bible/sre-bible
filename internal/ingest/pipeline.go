@@ -31,23 +31,33 @@ type Describer interface {
 	Describe(ctx context.Context, text string) (string, error)
 }
 
+// PIIScreener redacts personal information from extracted source text before it
+// is chunked, embedded, or stored. Phone numbers, home addresses, email addresses,
+// government IDs, and dates of birth are replaced with [redacted] in place.
+// LinkedIn and GitHub URLs are preserved.
+type PIIScreener interface {
+	ScreenPII(ctx context.Context, text string) (string, error)
+}
+
 // Pipeline orchestrates extract → chunk → embed → store for a single source.
 type Pipeline struct {
 	pdfExtractor PDFExtractor
 	urlExtractor URLExtractor
 	embedder     Embedder
 	describer    Describer
+	screener     PIIScreener
 	store        SourceRepository
 	log          *slog.Logger
 }
 
 // NewPipeline creates a Pipeline wired with the provided dependencies.
-func NewPipeline(pdfExtractor PDFExtractor, embedder Embedder, describer Describer, urlExtractor URLExtractor, store SourceRepository, log *slog.Logger) *Pipeline {
+func NewPipeline(pdfExtractor PDFExtractor, embedder Embedder, describer Describer, screener PIIScreener, urlExtractor URLExtractor, store SourceRepository, log *slog.Logger) *Pipeline {
 	return &Pipeline{
 		pdfExtractor: pdfExtractor,
 		urlExtractor: urlExtractor,
 		embedder:     embedder,
 		describer:    describer,
+		screener:     screener,
 		store:        store,
 		log:          log,
 	}
@@ -66,6 +76,15 @@ func (p *Pipeline) Run(ctx context.Context, location string) error {
 	if err != nil {
 		return fmt.Errorf("extract text from %s: %w", name, err)
 	}
+
+	// Screen for PII before any downstream use of the text. Redacted text flows
+	// into chunk content, embeddings, the source description, and full_text —
+	// all three sinks — because we mutate text before ChunkText and the errgroup.
+	text, err = p.screener.ScreenPII(ctx, text)
+	if err != nil {
+		return fmt.Errorf("screen pii for %s: %w", name, err)
+	}
+	p.log.InfoContext(ctx, "pii screen complete", "name", name)
 
 	// Chunk synchronously (pure CPU); describe and embed concurrently (both are network calls).
 	segments := ChunkText(text)
