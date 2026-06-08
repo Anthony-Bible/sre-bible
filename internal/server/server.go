@@ -64,10 +64,10 @@ type Server struct {
 // is no session history. Returned as a function to satisfy gochecknoglobals.
 func defaultSuggestedQuestions() []string {
 	return []string{
-		"What was Anthony's biggest reliability win at a previous company?",
+		"What are Anthony's biggest reliability wins?",
 		"How does Anthony approach on-call culture and incident response?",
 		"What infrastructure tooling and cloud platforms has Anthony used?",
-		"How has Anthony built or grown SRE teams and practices?",
+		"What is Anthony looking for in his next role?",
 		"I'd like to get in touch with Anthony",
 	}
 }
