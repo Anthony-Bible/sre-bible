@@ -49,10 +49,11 @@ func NewPipeline(embedder QueryEmbedder, searcher ChunkSearcher, generator Gener
 // sessionID identifies the current session; used to create a session-bound
 // EmailSender when an emailerFor factory is configured.
 // history contains prior turns from the Session (may be empty for first turn).
-// onStatus, if non-nil, receives transient status messages during tool rounds.
+// onTrace, if non-nil, receives each TraceStep in order: the retrieval step (always,
+// including the zero-chunk path), then the generator's tool_call and answer steps.
 // citations include both vector-retrieved chunk sources and any documents fetched
 // via the fetch_full_document tool during generation.
-func (p *Pipeline) Answer(ctx context.Context, sessionID string, history []Message, question string, onToken func(string) error, onStatus func(string) error) ([]string, error) {
+func (p *Pipeline) Answer(ctx context.Context, sessionID string, history []Message, question string, onToken func(string) error, onTrace func(TraceStep) error) ([]string, error) {
 	queryVec, err := p.embedder.EmbedQuery(ctx, question)
 	if err != nil {
 		return nil, err
@@ -61,6 +62,15 @@ func (p *Pipeline) Answer(ctx context.Context, sessionID string, history []Messa
 	chunks, err := p.searcher.SearchChunks(ctx, queryVec, p.k)
 	if err != nil {
 		return nil, err
+	}
+
+	// Emit the retrieval step on BOTH paths — before the zero-chunk branch — so it
+	// fires even on early return. This is the only place chunk Content is available
+	// before BuildUserMessage consumes it, so the grounding excerpts are captured here.
+	// Trace emission is best-effort: a failed transient write must not abort the answer
+	// (cancellation is handled via ctx, token streaming via onToken).
+	if onTrace != nil {
+		_ = onTrace(buildRetrievalStep(chunks))
 	}
 
 	if len(chunks) == 0 {
@@ -80,7 +90,7 @@ func (p *Pipeline) Answer(ctx context.Context, sessionID string, history []Messa
 	if p.emailerFor != nil {
 		tools.Emailer = p.emailerFor(sessionID)
 	}
-	toolFetched, err := p.generator.StreamAnswer(ctx, messages, tools, onToken, onStatus)
+	toolFetched, err := p.generator.StreamAnswer(ctx, messages, tools, onToken, onTrace)
 	if err != nil {
 		return nil, err
 	}
@@ -102,4 +112,26 @@ func (p *Pipeline) Answer(ctx context.Context, sessionID string, history []Messa
 
 	p.log.InfoContext(ctx, "query answered", "chunks", len(chunks), "citations", len(citations))
 	return citations, nil
+}
+
+// buildRetrievalStep turns the retrieved chunks into a TraceStep of kind retrieval:
+// one GroundingExcerpt per chunk (source + raw content), the chunk count, and the
+// count of distinct sources. Excerpts is always non-nil (empty on the zero-chunk path)
+// so it serialises to a JSON array rather than null.
+func buildRetrievalStep(chunks []RetrievedChunk) TraceStep {
+	excerpts := make([]GroundingExcerpt, 0, len(chunks))
+	seen := make(map[string]struct{}, len(chunks))
+	for _, c := range chunks {
+		excerpts = append(excerpts, GroundingExcerpt{SourceName: c.SourceName, Text: c.Content})
+		seen[c.SourceName] = struct{}{}
+	}
+	return TraceStep{
+		Kind:  TraceKindRetrieval,
+		Label: "Searched knowledge base",
+		Retrieval: &RetrievalDetail{
+			ChunkCount:  len(chunks),
+			SourceCount: len(seen),
+			Excerpts:    excerpts,
+		},
+	}
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -15,6 +16,18 @@ import (
 )
 
 const maxToolRounds = 5
+
+// tool_call trace outcomes.
+const (
+	outcomeOK       = "ok"
+	outcomeError    = "error"
+	outcomeNotFound = "not_found"
+	outcomeRefused  = "refused"
+)
+
+// emailTraceLabel is the generic, PII-free label recorded for every send_contact_email
+// trace step. The Viewer's name, email, draft, and any refusal reason are NEVER recorded.
+const emailTraceLabel = "Drafted a message to Anthony"
 
 const (
 	toolListDocuments     = "list_documents"
@@ -65,7 +78,12 @@ func NewClient(apiKey, model, systemPrompt string, log *slog.Logger) *Client {
 // when the model calls list_documents or fetch_full_document. Aborts if onToken
 // returns an error. Returns the names of any documents fetched via fetch_full_document
 // so callers can include them in citations.
-func (c *Client) StreamAnswer(ctx context.Context, messages []rag.Message, tools rag.ToolSet, onToken func(string) error, onStatus func(string) error) ([]string, error) {
+//
+// onTrace, if non-nil, receives one tool_call TraceStep per tool round and a terminal
+// answer TraceStep (carrying the tool-round count and wall-clock duration) before each
+// non-error return. The pipeline emits the retrieval step that precedes these.
+func (c *Client) StreamAnswer(ctx context.Context, messages []rag.Message, tools rag.ToolSet, onToken func(string) error, onTrace func(rag.TraceStep) error) ([]string, error) {
+	start := time.Now()
 	params := make([]anthropic.MessageParam, 0, len(messages)+2*maxToolRounds)
 	for _, m := range messages {
 		switch m.Role {
@@ -103,10 +121,12 @@ func (c *Client) StreamAnswer(ctx context.Context, messages []rag.Message, tools
 
 		if acc.StopReason != anthropic.StopReasonToolUse {
 			c.log.InfoContext(ctx, "stream complete", "model", c.model, "rounds", round+1)
+			// round = number of tool rounds that ran before this final answer.
+			emitAnswerStep(onTrace, round, start)
 			return fetchedNames, nil
 		}
 
-		toolResults, roundFetched := c.collectToolResults(ctx, round, acc, tools, onStatus)
+		toolResults, roundFetched := c.collectToolResults(ctx, round, acc, tools, onTrace)
 		fetchedNames = append(fetchedNames, roundFetched...)
 		if len(toolResults) == 0 {
 			// stop_reason=tool_use but no tool_use blocks — protocol violation; abort.
@@ -116,7 +136,32 @@ func (c *Client) StreamAnswer(ctx context.Context, messages []rag.Message, tools
 	}
 
 	c.log.InfoContext(ctx, "stream complete (tool cap hit)", "model", c.model)
+	emitAnswerStep(onTrace, maxToolRounds, start)
 	return fetchedNames, nil
+}
+
+// emitTrace delivers one TraceStep to onTrace on a best-effort basis. A nil onTrace is a
+// no-op, and a callback error is intentionally swallowed: the step is observability only,
+// the caller accumulates the trace independently, and a failed transient write (e.g. a
+// disconnected client) must never abort generation.
+func emitTrace(onTrace func(rag.TraceStep) error, step rag.TraceStep) {
+	if onTrace == nil {
+		return
+	}
+	_ = onTrace(step)
+}
+
+// emitAnswerStep emits the terminal answer TraceStep. toolRounds is the number of tool
+// rounds that ran; start anchors the wall-clock duration.
+func emitAnswerStep(onTrace func(rag.TraceStep) error, toolRounds int, start time.Time) {
+	emitTrace(onTrace, rag.TraceStep{
+		Kind:  rag.TraceKindAnswer,
+		Label: "Composed answer",
+		Answer: &rag.AnswerDetail{
+			ToolRounds: toolRounds,
+			DurationMs: time.Since(start).Milliseconds(),
+		},
+	})
 }
 
 // streamOnce runs a single streaming API call and returns the accumulated message.
@@ -145,7 +190,8 @@ func (c *Client) streamOnce(ctx context.Context, reqParams anthropic.MessageNewP
 // collectToolResults executes every tool_use block in acc.
 // Returns the tool result blocks to send back to the model and the names of any
 // documents successfully fetched via fetch_full_document (for citation tracking).
-func (c *Client) collectToolResults(ctx context.Context, round int, acc anthropic.Message, tools rag.ToolSet, onStatus func(string) error) ([]anthropic.ContentBlockParamUnion, []string) {
+// Each executed tool emits one tool_call TraceStep via onTrace (inside runTool).
+func (c *Client) collectToolResults(ctx context.Context, round int, acc anthropic.Message, tools rag.ToolSet, onTrace func(rag.TraceStep) error) ([]anthropic.ContentBlockParamUnion, []string) {
 	var results []anthropic.ContentBlockParamUnion
 	var fetchedNames []string
 	for _, cb := range acc.Content {
@@ -154,13 +200,38 @@ func (c *Client) collectToolResults(ctx context.Context, round int, acc anthropi
 		}
 		tu := cb.AsToolUse()
 		c.log.InfoContext(ctx, "tool use", "tool", tu.Name, "round", round+1)
-		text, isErr, sourceName := c.runTool(ctx, tu, tools, onStatus)
+		text, isErr, sourceName := c.runTool(ctx, tu, tools, onTrace)
 		results = append(results, anthropic.NewToolResultBlock(tu.ID, text, isErr))
 		if sourceName != "" {
 			fetchedNames = append(fetchedNames, sourceName)
 		}
 	}
 	return results, fetchedNames
+}
+
+// emitToolCall emits a tool_call TraceStep.
+//
+// PII rule: callers pass curated, PII-free labels and SAFE targets (document names only).
+// For send_contact_email, use emitEmailToolCall instead — it bakes in the PII-free label
+// and empty target so the Viewer's email, draft, and reason can never reach a trace.
+func emitToolCall(onTrace func(rag.TraceStep) error, label, tool, target, outcome string) {
+	emitTrace(onTrace, rag.TraceStep{
+		Kind:  rag.TraceKindToolCall,
+		Label: label,
+		ToolCall: &rag.ToolCallDetail{
+			Tool:    tool,
+			Target:  target,
+			Outcome: outcome,
+		},
+	})
+}
+
+// emitEmailToolCall emits the tool_call TraceStep for send_contact_email with only the
+// outcome varying. The PII-free label and empty target are hardcoded here so the email
+// path cannot leak the Viewer's name, address, message body, or any refusal reason into a
+// trace even by mistake — the structural enforcement of the PII rule, not just convention.
+func emitEmailToolCall(onTrace func(rag.TraceStep) error, outcome string) {
+	emitToolCall(onTrace, emailTraceLabel, toolSendContactEmail, "", outcome)
 }
 
 // buildToolParams returns tool definitions for whichever ToolSet fields are non-nil.
@@ -229,28 +300,30 @@ func buildToolParams(tools rag.ToolSet) []anthropic.ToolUnionParam {
 
 // runTool dispatches a tool_use block and returns the result text, whether it is an
 // error, and (for successful fetch_full_document calls) the fetched source name.
-func (c *Client) runTool(ctx context.Context, tu anthropic.ToolUseBlock, tools rag.ToolSet, onStatus func(string) error) (string, bool, string) {
-	if onStatus == nil {
-		onStatus = func(string) error { return nil }
-	}
+// Each branch emits exactly one tool_call TraceStep via onTrace with the curated label,
+// SAFE target, and mapped outcome.
+func (c *Client) runTool(ctx context.Context, tu anthropic.ToolUseBlock, tools rag.ToolSet, onTrace func(rag.TraceStep) error) (string, bool, string) {
 	switch tu.Name {
 	case toolListDocuments:
-		return c.runListDocuments(ctx, tools, onStatus)
+		return c.runListDocuments(ctx, tools, onTrace)
 	case toolFetchFullDocument:
-		return c.runFetchFullDocument(ctx, tu.Input, tools, onStatus)
+		return c.runFetchFullDocument(ctx, tu.Input, tools, onTrace)
 	case toolSendContactEmail:
-		return c.runSendContactEmail(ctx, tu.Input, tools, onStatus)
+		return c.runSendContactEmail(ctx, tu.Input, tools, onTrace)
 	default:
+		emitToolCall(onTrace, "Unknown tool", tu.Name, "", outcomeError)
 		return fmt.Sprintf("unknown tool: %s", tu.Name), true, ""
 	}
 }
 
-func (c *Client) runListDocuments(ctx context.Context, tools rag.ToolSet, onStatus func(string) error) (string, bool, string) {
-	_ = onStatus("Listing available documents…")
+func (c *Client) runListDocuments(ctx context.Context, tools rag.ToolSet, onTrace func(rag.TraceStep) error) (string, bool, string) {
+	const label = "Listing available documents…"
 	docs, err := tools.Lister.ListSources(ctx)
 	if err != nil {
+		emitToolCall(onTrace, label, toolListDocuments, "", outcomeError)
 		return fmt.Sprintf("error listing documents: %v", err), true, ""
 	}
+	emitToolCall(onTrace, label, toolListDocuments, "", outcomeOK)
 	if len(docs) == 0 {
 		return "No documents are available in the knowledge base.", false, ""
 	}
@@ -262,38 +335,46 @@ func (c *Client) runListDocuments(ctx context.Context, tools rag.ToolSet, onStat
 	return sb.String(), false, ""
 }
 
-func (c *Client) runFetchFullDocument(ctx context.Context, rawInput json.RawMessage, tools rag.ToolSet, onStatus func(string) error) (string, bool, string) {
+func (c *Client) runFetchFullDocument(ctx context.Context, rawInput json.RawMessage, tools rag.ToolSet, onTrace func(rag.TraceStep) error) (string, bool, string) {
 	var input struct {
 		SourceName string `json:"source_name"`
 	}
 	if err := json.Unmarshal(rawInput, &input); err != nil {
+		emitToolCall(onTrace, "Reading document…", toolFetchFullDocument, "", outcomeError)
 		return fmt.Sprintf("invalid fetch_full_document arguments: %v", err), true, ""
 	}
-	_ = onStatus(fmt.Sprintf("Reading %s…", input.SourceName))
+	label := fmt.Sprintf("Reading %s…", input.SourceName)
 	text, found, err := tools.Fetcher.GetFullText(ctx, input.SourceName)
 	if err != nil {
+		emitToolCall(onTrace, label, toolFetchFullDocument, input.SourceName, outcomeError)
 		return fmt.Sprintf("error fetching document: %v", err), true, ""
 	}
 	if !found {
+		emitToolCall(onTrace, label, toolFetchFullDocument, input.SourceName, outcomeNotFound)
 		return fmt.Sprintf("No document named %q is available (or it has no stored full text). Use list_documents to see valid names.", input.SourceName), false, ""
 	}
+	emitToolCall(onTrace, label, toolFetchFullDocument, input.SourceName, outcomeOK)
 	return text, false, input.SourceName
 }
 
-func (c *Client) runSendContactEmail(ctx context.Context, rawInput json.RawMessage, tools rag.ToolSet, onStatus func(string) error) (string, bool, string) {
+func (c *Client) runSendContactEmail(ctx context.Context, rawInput json.RawMessage, tools rag.ToolSet, onTrace func(rag.TraceStep) error) (string, bool, string) {
 	var input struct {
 		SenderName     string `json:"sender_name"`
 		SenderEmail    string `json:"sender_email"`
 		Message        string `json:"message"`
 		ConfirmedDraft bool   `json:"confirmed_draft"`
 	}
+	// Every trace step below goes through emitEmailToolCall, which bakes in the generic
+	// label and empty target — the Viewer's name, email, message body, and any refusal
+	// reason are never recorded.
 	if err := json.Unmarshal(rawInput, &input); err != nil {
+		emitEmailToolCall(onTrace, outcomeError)
 		return fmt.Sprintf("invalid send_contact_email arguments: %v", err), true, ""
 	}
 	if !input.ConfirmedDraft {
+		emitEmailToolCall(onTrace, outcomeRefused)
 		return "You must show the visitor a draft of the email and get their explicit confirmation before sending. Please present the draft and ask the visitor to confirm.", true, ""
 	}
-	_ = onStatus("Sending your message to Anthony…")
 	ok, reason, err := tools.Emailer.SendContactEmail(ctx, email.ContactEmail{
 		SenderName:  input.SenderName,
 		SenderEmail: input.SenderEmail,
@@ -301,10 +382,13 @@ func (c *Client) runSendContactEmail(ctx context.Context, rawInput json.RawMessa
 	})
 	if err != nil {
 		c.log.ErrorContext(ctx, "send contact email", slog.Any("err", err))
+		emitEmailToolCall(onTrace, outcomeError)
 		return "The email could not be sent due to an internal error. Apologize briefly to the visitor and suggest they reach Anthony at linkedin.com/in/anthonybible/ instead.", true, ""
 	}
 	if !ok {
+		emitEmailToolCall(onTrace, outcomeRefused)
 		return reason, true, ""
 	}
+	emitEmailToolCall(onTrace, outcomeOK)
 	return "Your message was sent to Anthony successfully. Confirm this to the visitor.", false, ""
 }

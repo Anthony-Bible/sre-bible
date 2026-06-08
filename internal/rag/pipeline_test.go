@@ -31,17 +31,17 @@ type stubGenerator struct {
 	received      []rag.Message
 	receivedTools rag.ToolSet
 	tokens        []string
-	statusMsgs    []string // status messages to emit via onStatus
-	fetchedNames  []string // tool-fetched source names to return from StreamAnswer
+	traceSteps    []rag.TraceStep // trace steps to emit via onTrace (simulating tool_call/answer)
+	fetchedNames  []string        // tool-fetched source names to return from StreamAnswer
 }
 
-func (g *stubGenerator) StreamAnswer(_ context.Context, messages []rag.Message, tools rag.ToolSet, onToken func(string) error, onStatus func(string) error) ([]string, error) {
+func (g *stubGenerator) StreamAnswer(_ context.Context, messages []rag.Message, tools rag.ToolSet, onToken func(string) error, onTrace func(rag.TraceStep) error) ([]string, error) {
 	g.called = true
 	g.received = messages
 	g.receivedTools = tools
-	for _, msg := range g.statusMsgs {
-		if onStatus != nil {
-			if err := onStatus(msg); err != nil {
+	for _, step := range g.traceSteps {
+		if onTrace != nil {
+			if err := onTrace(step); err != nil {
 				return nil, err
 			}
 		}
@@ -172,27 +172,142 @@ func TestPipeline_ToolSetThreaded(t *testing.T) {
 	}
 }
 
-func TestPipeline_OnStatusThreaded(t *testing.T) {
+func TestPipeline_OnTraceThreaded(t *testing.T) {
 	t.Parallel()
 
 	chunks := []rag.RetrievedChunk{{Content: "ctx", SourceName: "src"}}
+	// The generator emits a tool_call step; the pipeline must forward it to onTrace
+	// after its own retrieval step.
+	toolStep := rag.TraceStep{
+		Kind:     rag.TraceKindToolCall,
+		Label:    "Reading resume.pdf…",
+		ToolCall: &rag.ToolCallDetail{Tool: "fetch_full_document", Target: "resume.pdf", Outcome: "ok"},
+	}
 	gen := &stubGenerator{
 		tokens:     []string{"ok"},
-		statusMsgs: []string{"Reading resume.pdf…"},
+		traceSteps: []rag.TraceStep{toolStep},
 	}
 	pipe := newPipe(stubSearcher{chunks: chunks}, gen)
 
-	var statuses []string
-	_, err := pipe.Answer(context.Background(), "", nil, "q?", func(string) error { return nil }, func(msg string) error {
-		statuses = append(statuses, msg)
+	var steps []rag.TraceStep
+	_, err := pipe.Answer(context.Background(), "", nil, "q?", func(string) error { return nil }, func(step rag.TraceStep) error {
+		steps = append(steps, step)
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("Answer: %v", err)
 	}
 
-	if len(statuses) != 1 || statuses[0] != "Reading resume.pdf…" {
-		t.Errorf("onStatus messages: got %v, want [Reading resume.pdf…]", statuses)
+	// Expect the pipeline's retrieval step first, then the generator's tool_call step.
+	if len(steps) != 2 {
+		t.Fatalf("onTrace steps: got %d, want 2 (retrieval + tool_call)", len(steps))
+	}
+	if steps[0].Kind != rag.TraceKindRetrieval {
+		t.Errorf("steps[0].Kind: got %q, want %q", steps[0].Kind, rag.TraceKindRetrieval)
+	}
+	if steps[1].Kind != rag.TraceKindToolCall {
+		t.Errorf("steps[1].Kind: got %q, want %q", steps[1].Kind, rag.TraceKindToolCall)
+	}
+	if steps[1].ToolCall == nil || steps[1].ToolCall.Target != "resume.pdf" {
+		t.Errorf("steps[1] tool_call target: got %+v, want resume.pdf", steps[1].ToolCall)
+	}
+}
+
+func TestPipeline_RetrievalStepEmitted(t *testing.T) {
+	t.Parallel()
+
+	// Two distinct sources, one duplicate → ChunkCount=3, SourceCount=2.
+	chunks := []rag.RetrievedChunk{
+		{Content: "alpha", SourceName: "resume.pdf"},
+		{Content: "beta", SourceName: "about.html"},
+		{Content: "gamma", SourceName: "resume.pdf"},
+	}
+	gen := &stubGenerator{tokens: []string{"ok"}}
+	pipe := newPipe(stubSearcher{chunks: chunks}, gen)
+
+	var steps []rag.TraceStep
+	_, err := pipe.Answer(context.Background(), "", nil, "q?", func(string) error { return nil }, func(step rag.TraceStep) error {
+		steps = append(steps, step)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Answer: %v", err)
+	}
+
+	if len(steps) == 0 {
+		t.Fatal("expected at least the retrieval step, got none")
+	}
+	r := steps[0]
+	if r.Kind != rag.TraceKindRetrieval {
+		t.Fatalf("first step kind: got %q, want %q", r.Kind, rag.TraceKindRetrieval)
+	}
+	if r.Retrieval == nil {
+		t.Fatal("retrieval detail is nil")
+	}
+	if r.Retrieval.ChunkCount != 3 {
+		t.Errorf("ChunkCount: got %d, want 3", r.Retrieval.ChunkCount)
+	}
+	if r.Retrieval.SourceCount != 2 {
+		t.Errorf("SourceCount: got %d, want 2", r.Retrieval.SourceCount)
+	}
+	if len(r.Retrieval.Excerpts) != 3 {
+		t.Fatalf("excerpts: got %d, want 3 (one per chunk)", len(r.Retrieval.Excerpts))
+	}
+	// Excerpts preserve per-chunk source + raw content, in order.
+	wantExcerpts := []rag.GroundingExcerpt{
+		{SourceName: "resume.pdf", Text: "alpha"},
+		{SourceName: "about.html", Text: "beta"},
+		{SourceName: "resume.pdf", Text: "gamma"},
+	}
+	for i, w := range wantExcerpts {
+		if r.Retrieval.Excerpts[i] != w {
+			t.Errorf("excerpts[%d]: got %+v, want %+v", i, r.Retrieval.Excerpts[i], w)
+		}
+	}
+}
+
+func TestPipeline_ZeroChunkEmitsRetrievalStep(t *testing.T) {
+	t.Parallel()
+
+	gen := &stubGenerator{}
+	pipe := newPipe(stubSearcher{chunks: nil}, gen)
+
+	var steps []rag.TraceStep
+	var tokens []string
+	_, err := pipe.Answer(context.Background(), "", nil, "anything?", func(tok string) error {
+		tokens = append(tokens, tok)
+		return nil
+	}, func(step rag.TraceStep) error {
+		steps = append(steps, step)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Answer: %v", err)
+	}
+
+	// Even on the zero-chunk early-return path, exactly the retrieval step fires.
+	if len(steps) != 1 {
+		t.Fatalf("onTrace steps: got %d, want 1 (retrieval only)", len(steps))
+	}
+	r := steps[0]
+	if r.Kind != rag.TraceKindRetrieval || r.Retrieval == nil {
+		t.Fatalf("expected a retrieval step with detail, got %+v", r)
+	}
+	if r.Retrieval.ChunkCount != 0 {
+		t.Errorf("ChunkCount: got %d, want 0", r.Retrieval.ChunkCount)
+	}
+	if r.Retrieval.SourceCount != 0 {
+		t.Errorf("SourceCount: got %d, want 0", r.Retrieval.SourceCount)
+	}
+	if len(r.Retrieval.Excerpts) != 0 {
+		t.Errorf("excerpts: got %d, want 0", len(r.Retrieval.Excerpts))
+	}
+	// The generator must NOT be called, but the canned token must still be sent.
+	if gen.called {
+		t.Error("generator must not be called on the zero-chunk path")
+	}
+	if len(tokens) == 0 || !strings.Contains(strings.Join(tokens, ""), "couldn't find") {
+		t.Errorf("expected canned 'couldn't find' message, got %v", tokens)
 	}
 }
 

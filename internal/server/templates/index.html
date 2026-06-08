@@ -127,7 +127,81 @@
             max-width: 200px;
             overflow: hidden;
             text-overflow: ellipsis;
+            cursor: pointer;
+            transition: background 0.12s, border-color 0.12s, color 0.12s;
         }
+        .citation:hover { background: #e2e8f0; border-color: #cbd5e1; }
+        .citation:focus-visible { outline: 2px solid #93c5fd; outline-offset: 1px; }
+        .citation[aria-expanded="true"] {
+            background: #dbeafe;
+            border-color: #93c5fd;
+            color: #1d4ed8;
+        }
+
+        /* Agent Trace — per-message collapsible reasoning timeline. */
+        .trace {
+            margin-top: 0.4rem;
+            font-size: 0.78rem;
+            color: #64748b;
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 0.6rem;
+            padding: 0.35rem 0.6rem;
+        }
+        .trace > summary {
+            cursor: pointer;
+            list-style: none;
+            color: #475569;
+            font-weight: 600;
+            user-select: none;
+        }
+        .trace > summary::-webkit-details-marker { display: none; }
+        .trace > summary::before {
+            content: '▸';
+            display: inline-block;
+            margin-right: 0.35rem;
+            transition: transform 0.12s;
+        }
+        .trace[open] > summary::before { transform: rotate(90deg); }
+        .trace-steps {
+            list-style: none;
+            margin: 0.4rem 0 0.1rem;
+            padding-left: 0.2rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.2rem;
+        }
+        .trace-step { line-height: 1.5; }
+        .trace-step.trace-answer { color: #16a34a; }
+
+        /* Grounding reveal — exact retrieved excerpt(s) behind a citation. */
+        .grounding {
+            margin-top: 0.4rem;
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-left: 3px solid #2563eb;
+            border-radius: 0.5rem;
+            padding: 0.5rem 0.7rem;
+            font-size: 0.8rem;
+            color: #334155;
+            max-height: 220px;
+            overflow-y: auto;
+        }
+        .grounding-source {
+            font-weight: 700;
+            font-size: 0.72rem;
+            color: #2563eb;
+            margin-bottom: 0.3rem;
+        }
+        .grounding-excerpt {
+            white-space: pre-wrap;
+            word-break: break-word;
+            border-left: 2px solid #cbd5e1;
+            padding-left: 0.5rem;
+            margin: 0.3rem 0;
+            color: #475569;
+        }
+        .grounding-empty { font-style: italic; color: #94a3b8; }
 
         #suggestions {
             display: flex;
@@ -154,15 +228,7 @@
         }
 
         #streaming-bubble { display: none; }
-
-        #status-indicator {
-            font-size: 0.8125rem;
-            color: #64748b;
-            font-style: italic;
-            min-height: 1.2em;
-            padding: 0 0.25rem;
-            transition: opacity 0.15s;
-        }
+        #streaming-trace { display: none; }
 
         .streaming-cursor::after {
             content: '▋';
@@ -243,7 +309,10 @@
             {{end}}
         </div>
 
-        <div id="status-indicator"></div>
+        <details class="trace" id="streaming-trace" open>
+            <summary id="streaming-trace-summary">Working&hellip;</summary>
+            <ol class="trace-steps" id="streaming-trace-steps"></ol>
+        </details>
 
         <div id="streaming-bubble" class="message assistant">
             <div class="msg-body" id="streaming-content"></div>
@@ -286,7 +355,7 @@
             for (const m of msgs) {
                 try {
                     if (m.role === 'user') appendUserBubble(m.content);
-                    else finalizeStreamingBubble(m.content, m.citations || []);
+                    else finalizeStreamingBubble(m.content, m.citations || [], m.trace || []);
                 } catch (_) { /* skip corrupt message, continue restoring rest */ }
             }
         }
@@ -347,40 +416,171 @@
             scrollToBottom();
         }
 
-        function showStatus(msg) {
-            document.getElementById('status-indicator').textContent = msg;
+        // --- Agent Trace rendering --------------------------------------
+
+        // Steps accumulated for the in-flight assistant turn; reset per question.
+        let currentTrace = [];
+
+        function plural(n, word) { return n + ' ' + word + (n === 1 ? '' : 's'); }
+
+        function outcomeIcon(outcome) {
+            switch (outcome) {
+                case 'ok': return '🔧';
+                case 'not_found': return '∅';
+                case 'refused': return '⛔';
+                case 'error': return '⚠';
+                default: return '🔧';
+            }
         }
 
-        function clearStatus() {
-            document.getElementById('status-indicator').textContent = '';
+        // renderTraceStep returns the <li> HTML for one step. All free-text
+        // (labels) is escaped — never rendered as markdown.
+        function renderTraceStep(step) {
+            const label = escapeHTML(step.label || step.kind || '');
+            if (step.kind === 'retrieval' && step.retrieval) {
+                const r = step.retrieval;
+                const detail = ` — ${plural(r.chunk_count || 0, 'chunk')} from ${plural(r.source_count || 0, 'source')}`;
+                return `<li class="trace-step trace-retrieval">🔍 ${label}${detail}</li>`;
+            }
+            if (step.kind === 'tool_call' && step.tool_call) {
+                return `<li class="trace-step trace-tool">${outcomeIcon(step.tool_call.outcome)} ${label}</li>`;
+            }
+            if (step.kind === 'answer' && step.answer) {
+                const rounds = step.answer.tool_rounds || 0;
+                return `<li class="trace-step trace-answer">✓ ${label} — ${plural(rounds, 'tool round')}</li>`;
+            }
+            return `<li class="trace-step">${label}</li>`;
         }
 
-        function finalizeStreamingBubble(text, citations) {
-            clearStatus();
+        // traceSummary collapses a full trace to a one-line <summary> string.
+        function traceSummary(steps) {
+            let chunkCount = null, rounds = 0;
+            for (const s of steps) {
+                if (s.kind === 'retrieval' && s.retrieval) chunkCount = s.retrieval.chunk_count || 0;
+                else if (s.kind === 'tool_call') rounds++;
+                if (s.kind === 'answer' && s.answer) rounds = s.answer.tool_rounds || rounds;
+            }
+            const parts = [];
+            if (chunkCount !== null) parts.push(plural(chunkCount, 'chunk'));
+            if (rounds > 0) parts.push(plural(rounds, 'tool round'));
+            return '🔍 Agent trace' + (parts.length ? ' · ' + parts.join(' · ') : '');
+        }
+
+        // groupExcerpts maps source_name -> [excerpt text] from the retrieval step.
+        function groupExcerpts(steps) {
+            const map = {};
+            for (const s of steps) {
+                if (s.kind === 'retrieval' && s.retrieval && Array.isArray(s.retrieval.excerpts)) {
+                    for (const ex of s.retrieval.excerpts) {
+                        (map[ex.source_name] = map[ex.source_name] || []).push(ex.text);
+                    }
+                }
+            }
+            return map;
+        }
+
+        // renderLiveTrace repaints the live streaming trace panel from currentTrace.
+        function renderLiveTrace() {
+            const panel = document.getElementById('streaming-trace');
+            panel.style.display = '';
+            panel.open = true;
+            document.getElementById('streaming-trace-summary').textContent = traceSummary(currentTrace);
+            document.getElementById('streaming-trace-steps').innerHTML =
+                currentTrace.map(renderTraceStep).join('');
+            scrollToBottom();
+        }
+
+        function resetLiveTrace() {
+            currentTrace = [];
+            const panel = document.getElementById('streaming-trace');
+            panel.style.display = 'none';
+            document.getElementById('streaming-trace-steps').innerHTML = '';
+            document.getElementById('streaming-trace-summary').textContent = 'Working…';
+        }
+
+        // wireCitations makes each citation pill reveal its source's grounding
+        // excerpts. Excerpt text is raw document content -> escapeHTML only.
+        function wireCitations(div, excerptsBySource) {
+            const grounding = div.querySelector('.grounding');
+            const pills = div.querySelectorAll('.citation');
+            if (!grounding || pills.length === 0) return;
+            let openSource = null;
+
+            function reveal(pill) {
+                const src = pill.getAttribute('data-source');
+                if (openSource === src) {
+                    grounding.hidden = true;
+                    pill.setAttribute('aria-expanded', 'false');
+                    openSource = null;
+                    return;
+                }
+                pills.forEach(p => p.setAttribute('aria-expanded', 'false'));
+                pill.setAttribute('aria-expanded', 'true');
+                openSource = src;
+
+                const excerpts = excerptsBySource[src];
+                let html = `<div class="grounding-source">${escapeHTML(src)}</div>`;
+                if (excerpts && excerpts.length > 0) {
+                    html += excerpts.map(t =>
+                        `<blockquote class="grounding-excerpt">${escapeHTML(t)}</blockquote>`
+                    ).join('');
+                } else {
+                    html += `<p class="grounding-empty">Fetched full document — no excerpt available.</p>`;
+                }
+                grounding.innerHTML = html;
+                grounding.hidden = false;
+                scrollToBottom();
+            }
+
+            pills.forEach(pill => {
+                pill.addEventListener('click', () => reveal(pill));
+                pill.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); reveal(pill); }
+                });
+            });
+        }
+
+        function finalizeStreamingBubble(text, citations, trace) {
+            trace = trace || [];
             const bubble = document.getElementById('streaming-bubble');
             bubble.style.display = 'none';
             document.getElementById('streaming-content').innerHTML = '';
+            resetLiveTrace();
 
             const log = document.getElementById('chat-log');
             const div = document.createElement('div');
             div.className = 'message assistant';
 
             let inner = `<div class="msg-body">${safeMarkdown(text)}</div>`;
+
+            // Agent trace panel — collapsed by default. Omit entirely when empty
+            // (legacy NULL rows / zero-step turns).
+            if (trace.length > 0) {
+                const steps = trace.map(renderTraceStep).join('');
+                inner += `<details class="trace"><summary>${escapeHTML(traceSummary(trace))}</summary>` +
+                    `<ol class="trace-steps">${steps}</ol></details>`;
+            }
+
             if (citations && citations.length > 0) {
                 const cHtml = citations.map((c, i) =>
-                    `<span class="citation">[${i + 1}] ${escapeHTML(c)}</span>`
+                    `<span class="citation" role="button" tabindex="0" aria-expanded="false" data-source="${escapeHTML(c)}">[${i + 1}] ${escapeHTML(c)}</span>`
                 ).join('');
                 inner += `<div class="citations">${cHtml}</div>`;
+                inner += `<div class="grounding" hidden></div>`;
             }
+
             div.innerHTML = inner;
             log.appendChild(div);
-            scrollToBottom();
 
+            // wireCitations self-guards — it no-ops when the message has no citation pills.
+            wireCitations(div, groupExcerpts(trace));
+
+            scrollToBottom();
             document.getElementById('send-btn').disabled = false;
         }
 
         function showError(msg) {
-            clearStatus();
+            resetLiveTrace();
             document.getElementById('streaming-bubble').style.display = 'none';
             document.getElementById('streaming-content').innerHTML = '';
 
@@ -418,6 +618,7 @@
             document.getElementById('suggestions')?.remove();
 
             appendUserBubble(q);
+            resetLiveTrace();
             showStreamingBubble();
             document.getElementById('send-btn').disabled = true;
 
@@ -471,13 +672,13 @@
                         }
                         if (!data) continue;
                         if (event === 'token') {
-                            clearStatus();
                             accum += JSON.parse(data).t;
                             updateStreamingBubble(safeMarkdown(accum));
-                        } else if (event === 'status') {
-                            showStatus(JSON.parse(data).msg);
+                        } else if (event === 'trace') {
+                            currentTrace.push(JSON.parse(data).step);
+                            renderLiveTrace();
                         } else if (event === 'done') {
-                            finalizeStreamingBubble(accum, JSON.parse(data).citations);
+                            finalizeStreamingBubble(accum, JSON.parse(data).citations, currentTrace);
                         } else if (event === 'error') {
                             showError(JSON.parse(data).msg);
                         }

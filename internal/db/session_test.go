@@ -153,7 +153,7 @@ func TestAppendMessage_UserNoCitations(t *testing.T) {
 	}
 
 	msg := rag.Message{Role: rag.RoleUser, Content: "hello from the crawler"}
-	if err := store.AppendMessage(ctx, id, msg, nil); err != nil {
+	if err := store.AppendMessage(ctx, id, msg, nil, nil); err != nil {
 		t.Fatalf("AppendMessage with nil citations: %v", err)
 	}
 
@@ -197,7 +197,7 @@ func TestAppendMessage_AssistantWithCitations(t *testing.T) {
 
 	wantCitations := []string{"resume.pdf", "anthonybible.com"}
 	msg := rag.Message{Role: rag.RoleAssistant, Content: "here is your answer, crawler"}
-	if err := store.AppendMessage(ctx, id, msg, wantCitations); err != nil {
+	if err := store.AppendMessage(ctx, id, msg, wantCitations, nil); err != nil {
 		t.Fatalf("AppendMessage with citations: %v", err)
 	}
 
@@ -226,6 +226,126 @@ func TestAppendMessage_AssistantWithCitations(t *testing.T) {
 	}
 }
 
+// --- Contract 4b: AppendMessage — assistant message with Agent Trace ---
+
+// TestAppendMessage_AssistantWithTrace_RoundTrip verifies that a non-empty Agent Trace
+// persisted with an assistant turn survives a round-trip through the JSONB column with its
+// structured detail intact (kinds, counts, grounding excerpts, tool-call target/outcome).
+func TestAppendMessage_AssistantWithTrace_RoundTrip(t *testing.T) {
+	pool, cleanup := testSessionDB(t)
+	defer cleanup()
+
+	store := db.NewSessionStore(pool, slog.Default())
+	id := sessionID("a1a1a1a1a1a1")
+	ctx := context.Background()
+
+	if err := store.CreateSession(ctx, id); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	wantTrace := []rag.TraceStep{
+		{
+			Kind:  rag.TraceKindRetrieval,
+			Label: "Searched knowledge base",
+			Retrieval: &rag.RetrievalDetail{
+				ChunkCount:  2,
+				SourceCount: 1,
+				Excerpts:    []rag.GroundingExcerpt{{SourceName: "resume.pdf", Text: "grounding excerpt"}},
+			},
+		},
+		{
+			Kind:     rag.TraceKindToolCall,
+			Label:    "Reading resume.pdf…",
+			ToolCall: &rag.ToolCallDetail{Tool: "fetch_full_document", Target: "resume.pdf", Outcome: "ok"},
+		},
+		{
+			Kind:   rag.TraceKindAnswer,
+			Label:  "Composed answer",
+			Answer: &rag.AnswerDetail{ToolRounds: 1, DurationMs: 1234},
+		},
+	}
+	msg := rag.Message{Role: rag.RoleAssistant, Content: "answer with trace"}
+	if err := store.AppendMessage(ctx, id, msg, []string{"resume.pdf"}, wantTrace); err != nil {
+		t.Fatalf("AppendMessage with trace: %v", err)
+	}
+
+	msgs, err := store.ListMessages(ctx, id)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(msgs))
+	}
+
+	gotTrace := msgs[0].Trace
+	if len(gotTrace) != len(wantTrace) {
+		t.Fatalf("trace length: got %d, want %d", len(gotTrace), len(wantTrace))
+	}
+
+	// retrieval step
+	if gotTrace[0].Kind != rag.TraceKindRetrieval || gotTrace[0].Retrieval == nil {
+		t.Fatalf("trace[0]: got %+v, want a retrieval step with detail", gotTrace[0])
+	}
+	if gotTrace[0].Retrieval.ChunkCount != 2 || gotTrace[0].Retrieval.SourceCount != 1 {
+		t.Errorf("retrieval counts: got chunk=%d source=%d, want 2/1",
+			gotTrace[0].Retrieval.ChunkCount, gotTrace[0].Retrieval.SourceCount)
+	}
+	if len(gotTrace[0].Retrieval.Excerpts) != 1 || gotTrace[0].Retrieval.Excerpts[0].Text != "grounding excerpt" {
+		t.Errorf("grounding excerpts not preserved: %+v", gotTrace[0].Retrieval.Excerpts)
+	}
+
+	// tool_call step
+	if gotTrace[1].Kind != rag.TraceKindToolCall || gotTrace[1].ToolCall == nil {
+		t.Fatalf("trace[1]: got %+v, want a tool_call step with detail", gotTrace[1])
+	}
+	if gotTrace[1].ToolCall.Target != "resume.pdf" || gotTrace[1].ToolCall.Outcome != "ok" {
+		t.Errorf("tool_call detail: got %+v, want target=resume.pdf outcome=ok", gotTrace[1].ToolCall)
+	}
+
+	// answer step
+	if gotTrace[2].Kind != rag.TraceKindAnswer || gotTrace[2].Answer == nil {
+		t.Fatalf("trace[2]: got %+v, want an answer step with detail", gotTrace[2])
+	}
+	if gotTrace[2].Answer.ToolRounds != 1 || gotTrace[2].Answer.DurationMs != 1234 {
+		t.Errorf("answer detail: got %+v, want rounds=1 durationMs=1234", gotTrace[2].Answer)
+	}
+}
+
+// --- Contract 4c: ListMessages — NULL trace degrades to nil ---
+
+// TestListMessages_NilTraceDegradesGracefully verifies that a message stored with no
+// trace (a user turn, or a legacy assistant row) yields a nil Trace and no error — the
+// NULL JSONB column must not break the list.
+func TestListMessages_NilTraceDegradesGracefully(t *testing.T) {
+	pool, cleanup := testSessionDB(t)
+	defer cleanup()
+
+	store := db.NewSessionStore(pool, slog.Default())
+	id := sessionID("b2b2b2b2b2b2")
+	ctx := context.Background()
+
+	if err := store.CreateSession(ctx, id); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	// Append with an explicitly nil trace — the column is written as SQL NULL.
+	msg := rag.Message{Role: rag.RoleUser, Content: "no trace here"}
+	if err := store.AppendMessage(ctx, id, msg, nil, nil); err != nil {
+		t.Fatalf("AppendMessage with nil trace: %v", err)
+	}
+
+	msgs, err := store.ListMessages(ctx, id)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(msgs))
+	}
+	if msgs[0].Trace != nil {
+		t.Errorf("Trace: got %v, want nil for a NULL trace column", msgs[0].Trace)
+	}
+}
+
 // --- Contract 5: ListMessages ordering ---
 
 // TestListMessages_OrderedByCreatedAt verifies that ListMessages returns
@@ -247,10 +367,10 @@ func TestListMessages_OrderedByCreatedAt(t *testing.T) {
 	userMsg := rag.Message{Role: rag.RoleUser, Content: "user turn"}
 	assistantMsg := rag.Message{Role: rag.RoleAssistant, Content: "assistant turn"}
 
-	if err := store.AppendMessage(ctx, id, userMsg, nil); err != nil {
+	if err := store.AppendMessage(ctx, id, userMsg, nil, nil); err != nil {
 		t.Fatalf("AppendMessage user: %v", err)
 	}
-	if err := store.AppendMessage(ctx, id, assistantMsg, []string{"src.pdf"}); err != nil {
+	if err := store.AppendMessage(ctx, id, assistantMsg, []string{"src.pdf"}, nil); err != nil {
 		t.Fatalf("AppendMessage assistant: %v", err)
 	}
 
@@ -291,10 +411,10 @@ func TestListMessages_SessionIsolation(t *testing.T) {
 	msgA := rag.Message{Role: rag.RoleUser, Content: "session A message"}
 	msgB := rag.Message{Role: rag.RoleUser, Content: "session B message"}
 
-	if err := store.AppendMessage(ctx, idA, msgA, nil); err != nil {
+	if err := store.AppendMessage(ctx, idA, msgA, nil, nil); err != nil {
 		t.Fatalf("AppendMessage session A: %v", err)
 	}
-	if err := store.AppendMessage(ctx, idB, msgB, nil); err != nil {
+	if err := store.AppendMessage(ctx, idB, msgB, nil, nil); err != nil {
 		t.Fatalf("AppendMessage session B: %v", err)
 	}
 
