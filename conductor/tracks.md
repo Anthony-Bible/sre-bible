@@ -4,5 +4,5 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [ ] **Track: We need to finish setting up conductor**
-  *Link: [./tracks/finish_setting_up_conductor_20260608/](./tracks/finish_setting_up_conductor_20260608/)*
+- [ ] **Track: Implement Secret 'Deadpool Mode' Easter Egg**
+  *Link: [./tracks/deadpool_mode_20260608/](./tracks/deadpool_mode_20260608/)*

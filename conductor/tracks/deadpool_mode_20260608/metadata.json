@@ -1,8 +1,8 @@
 {
-  "track_id": "finish_setting_up_conductor_20260608",
+  "track_id": "deadpool_mode_20260608",
   "type": "feature",
   "status": "new",
   "created_at": "2026-06-08T00:00:00Z",
   "updated_at": "2026-06-08T00:00:00Z",
-  "description": "We need to finish setting up conductor"
+  "description": "Implement Secret 'Deadpool Mode' Easter Egg"
 }
