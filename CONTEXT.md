@@ -36,7 +36,7 @@ A Viewer-initiated message that the Resume Agent delivers to the Owner via email
 A curated set of 3–5 hardcoded prompts displayed to the Viewer before their first message. Intended to reduce friction and guide Viewers toward the Owner's strongest talking points. Disappear once the conversation begins.
 
 ### Citation
-A footnote-style source attribution displayed at the bottom of each Resume Agent response, listing which Sources the answer was drawn from (e.g., `resume.pdf`, `anthonybible.com/about`). Citations are source-level, not chunk-level.
+A footnote-style source attribution displayed at the bottom of each Resume Agent response, listing which Sources the answer was drawn from (e.g., `resume.pdf`, `anthonybible.com/about`). Citations are source-level, not chunk-level. Each Citation is clickable: selecting it reveals the Grounding Excerpts retrieved from that Source (or, for a Source the Resume Agent reached only via Escalation, a "fetched full document" note with no excerpt).
 
 ### Message
 A single conversational turn within a Session. Each Message has a role (`user` or `assistant`) and a text content. User Messages contain the Viewer's question. Assistant Messages contain the Resume Agent's response. Messages are persisted to Cloud SQL and are visible to the Owner for analytics.
@@ -51,4 +51,13 @@ The complete Gemini-extracted markdown of a Source, stored in the `sources.full_
 A capability the Resume Agent's model may invoke during answer generation, beyond the initial chunk context. Three tools exist: `list_documents` (returns all Source names and types), `fetch_full_document` (returns the Full Text of a named Source), and `send_contact_email` (delivers a Viewer-composed message to the Owner via AWS SES — see Contact Email). Tools are defined in `internal/llm` and exposed to the model via the Anthropic tool-use API. The tool loop is capped at 5 rounds.
 
 ### Escalation
-The act of the Resume Agent fetching a Source's Full Text when the initially retrieved Chunks are insufficient to answer a Viewer's question. Escalation is model-driven — the Resume Agent decides when Chunks are inadequate and calls the appropriate Tool. Escalation produces a transient status message visible in the chat UI ("Reading resume.pdf…") but does not alter session history or citations.
+The act of the Resume Agent fetching a Source's Full Text when the initially retrieved Chunks are insufficient to answer a Viewer's question. Escalation is model-driven — the Resume Agent decides when Chunks are inadequate and calls the appropriate Tool. Each Escalation is recorded as a `tool_call` Trace Step in the persisted Agent Trace, so it remains visible after reload and to the Owner for analytics.
+
+### Agent Trace
+The persisted, ordered record of the steps the Resume Agent took to produce a single assistant Message — retrieval, any Tool calls (Escalations), and the final answer. Stored per Message in the `messages.trace` JSONB column and returned by the message-history API, so it survives reload. Displayed as a collapsible per-Message timeline in the chat UI (auto-expanded while streaming, collapsed to a one-line summary once the answer completes). Recorded with a strict allow-list of safe data — curated step labels plus document names and counts — and never the system prompt, internal prompts, raw tool payloads, or any Contact Email content.
+
+### Trace Step
+A single entry in an Agent Trace. Each Step has a kind — `retrieval` (the Chunk search: how many Chunks from how many Sources, plus the Grounding Excerpts), `tool_call` (one Tool invocation: tool name, safe target document name, and outcome), or `answer` (the final composition: number of tool rounds and duration) — and a human-readable label. A `send_contact_email` Tool call is recorded with a generic label and no target, never the message details.
+
+### Grounding Excerpt
+The exact text of a retrieved Chunk, paired with its Source name, carried in the `retrieval` Trace Step. Grounding Excerpts are what a Citation reveals when clicked, letting a Viewer see the precise source passage an answer was drawn from. They contain the same Chunk text already sent to the model and are rendered as plain text (never interpreted as markup).

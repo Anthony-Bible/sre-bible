@@ -1,9 +1,12 @@
 package server
 
 import (
+	"encoding/json"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/Anthony-Bible/sre-bible/internal/rag"
 )
 
 // testFlusher wraps httptest.ResponseRecorder and satisfies http.Flusher so
@@ -134,26 +137,63 @@ func TestWriteSSE_MultipleEvents(t *testing.T) {
 	}
 }
 
-// TestSseStatus_Format verifies the exact wire encoding of a status event:
-//
-//	event: status\ndata: {"msg":"<value>"}\n\n
-func TestSseStatus_Format(t *testing.T) {
+// TestSseTrace_Format verifies the wire encoding of a trace event: it must use the
+// "trace" event name and embed the structured step under a "step" key. The step's typed
+// fields (kind, label, and the matching detail object) must round-trip through the frame.
+func TestSseTrace_Format(t *testing.T) {
 	tf := newTestFlusher()
 
-	err := sseStatus(tf, tf, "Reading resume.pdf…")
-	if err != nil {
-		t.Fatalf("sseStatus returned unexpected error: %v", err)
+	step := rag.TraceStep{
+		Kind:  rag.TraceKindRetrieval,
+		Label: "Searched knowledge base",
+		Retrieval: &rag.RetrievalDetail{
+			ChunkCount:  2,
+			SourceCount: 1,
+			Excerpts:    []rag.GroundingExcerpt{{SourceName: "resume.pdf", Text: "hello"}},
+		},
+	}
+
+	if err := sseTrace(tf, tf, step); err != nil {
+		t.Fatalf("sseTrace returned unexpected error: %v", err)
 	}
 
 	body := tf.Body.String()
-
-	if !strings.Contains(body, "event: status") {
-		t.Errorf("sseStatus body missing event name, got: %q", body)
+	if !strings.Contains(body, "event: trace") {
+		t.Errorf("sseTrace body missing event name, got: %q", body)
 	}
-	if !strings.Contains(body, `"msg":"Reading resume.pdf`) {
-		t.Errorf("sseStatus body missing msg field, got: %q", body)
+	if !strings.Contains(body, `"kind":"retrieval"`) {
+		t.Errorf("sseTrace body missing kind field, got: %q", body)
+	}
+	if !strings.Contains(body, `"chunk_count":2`) {
+		t.Errorf("sseTrace body missing retrieval detail, got: %q", body)
+	}
+	if !strings.Contains(body, `"source_name":"resume.pdf"`) {
+		t.Errorf("sseTrace body missing grounding excerpt, got: %q", body)
 	}
 	if !tf.flushed {
-		t.Error("sseStatus did not call Flush")
+		t.Error("sseTrace did not call Flush")
+	}
+
+	// The frame must be parseable back into the same step (data: <json> line).
+	const dataPrefix = "data: "
+	var jsonLine string
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, dataPrefix) {
+			jsonLine = strings.TrimPrefix(line, dataPrefix)
+			break
+		}
+	}
+	if jsonLine == "" {
+		t.Fatalf("no data line found in frame: %q", body)
+	}
+	var got tracePayload
+	if err := json.Unmarshal([]byte(jsonLine), &got); err != nil {
+		t.Fatalf("unmarshal trace payload: %v", err)
+	}
+	if got.Step.Kind != rag.TraceKindRetrieval {
+		t.Errorf("round-trip kind: got %q, want %q", got.Step.Kind, rag.TraceKindRetrieval)
+	}
+	if got.Step.Retrieval == nil || got.Step.Retrieval.ChunkCount != 2 {
+		t.Errorf("round-trip retrieval detail mismatch: %+v", got.Step.Retrieval)
 	}
 }

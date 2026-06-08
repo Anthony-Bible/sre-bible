@@ -34,6 +34,7 @@ type appendedCall struct {
 	sessionID string
 	msg       rag.Message
 	citations []string
+	trace     []rag.TraceStep
 }
 
 func (s *stubSessions) CreateSession(_ context.Context, _ string) error {
@@ -44,8 +45,8 @@ func (s *stubSessions) ListMessages(_ context.Context, _ string) ([]StoredMessag
 	return s.messages, s.listErr
 }
 
-func (s *stubSessions) AppendMessage(_ context.Context, sid string, msg rag.Message, cit []string) error {
-	s.appended = append(s.appended, appendedCall{sid, msg, cit})
+func (s *stubSessions) AppendMessage(_ context.Context, sid string, msg rag.Message, cit []string, trace []rag.TraceStep) error {
+	s.appended = append(s.appended, appendedCall{sid, msg, cit, trace})
 	return s.appendErr
 }
 
@@ -70,21 +71,21 @@ func (st *stubTurnstile) Verify(_ context.Context, _, _ string) (bool, error) {
 	return st.ok, st.err
 }
 
-// stubPipeline implements Answerer with controllable tokens and citations.
+// stubPipeline implements Answerer with controllable tokens, citations, and trace steps.
 type stubPipeline struct {
 	tokens     []string
 	citations  []string
 	err        error
-	statusMsgs []string // status messages emitted via onStatus
+	traceSteps []rag.TraceStep // trace steps emitted via onTrace
 }
 
-func (p *stubPipeline) Answer(_ context.Context, _ string, _ []rag.Message, _ string, onToken func(string) error, onStatus func(string) error) ([]string, error) {
+func (p *stubPipeline) Answer(_ context.Context, _ string, _ []rag.Message, _ string, onToken func(string) error, onTrace func(rag.TraceStep) error) ([]string, error) {
 	if p.err != nil {
 		return nil, p.err
 	}
-	for _, msg := range p.statusMsgs {
-		if onStatus != nil {
-			if err := onStatus(msg); err != nil {
+	for _, step := range p.traceSteps {
+		if onTrace != nil {
+			if err := onTrace(step); err != nil {
 				return nil, err
 			}
 		}
@@ -262,6 +263,77 @@ func TestHandleMessages_HappyPath(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// TestHandleMessages_TraceReturned
+// ---------------------------------------------------------------------------
+
+// TestHandleMessages_TraceReturned verifies that GET /messages includes each message's
+// persisted Agent Trace, with a nil trace normalised to an empty array (never JSON null)
+// so the client always receives a consistent type.
+func TestHandleMessages_TraceReturned(t *testing.T) {
+	t.Parallel()
+
+	trace := []rag.TraceStep{
+		{
+			Kind:  rag.TraceKindRetrieval,
+			Label: "Searched knowledge base",
+			Retrieval: &rag.RetrievalDetail{
+				ChunkCount:  2,
+				SourceCount: 1,
+				Excerpts:    []rag.GroundingExcerpt{{SourceName: "resume.pdf", Text: "excerpt text"}},
+			},
+		},
+	}
+	sessions := &stubSessions{
+		messages: []StoredMessage{
+			{Message: rag.Message{Role: rag.RoleUser, Content: "hi"}, Trace: nil},
+			{Message: rag.Message{Role: rag.RoleAssistant, Content: "hello"}, Citations: []string{"resume.pdf"}, Trace: trace},
+		},
+	}
+	srv := newTestServer(t, &stubPipeline{}, sessions)
+
+	req := httptest.NewRequest(http.MethodGet, "/messages", nil)
+	req.Header.Set(sessionHeader, validSessionFixture)
+	rr := httptest.NewRecorder()
+
+	srv.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+
+	var msgs []messageDTO
+	if err := json.NewDecoder(rr.Body).Decode(&msgs); err != nil {
+		t.Fatalf("decode response body: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("got %d messages, want 2", len(msgs))
+	}
+
+	// User turn: nil trace must be normalised to an empty slice, not JSON null.
+	if msgs[0].Trace == nil {
+		t.Error("user trace must be normalised to [], got nil")
+	}
+	if len(msgs[0].Trace) != 0 {
+		t.Errorf("user trace must be empty, got %v", msgs[0].Trace)
+	}
+
+	// Assistant turn: trace preserved with its structured detail.
+	if len(msgs[1].Trace) != 1 {
+		t.Fatalf("assistant trace len: got %d, want 1", len(msgs[1].Trace))
+	}
+	step := msgs[1].Trace[0]
+	if step.Kind != rag.TraceKindRetrieval || step.Retrieval == nil {
+		t.Fatalf("assistant trace step: got %+v, want a retrieval step with detail", step)
+	}
+	if step.Retrieval.ChunkCount != 2 || step.Retrieval.SourceCount != 1 {
+		t.Errorf("retrieval counts: got chunk=%d source=%d, want 2/1", step.Retrieval.ChunkCount, step.Retrieval.SourceCount)
+	}
+	if len(step.Retrieval.Excerpts) != 1 || step.Retrieval.Excerpts[0].Text != "excerpt text" {
+		t.Errorf("grounding excerpts not preserved: %+v", step.Retrieval.Excerpts)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // TestHandleMessages_ListMessagesFails
 // ---------------------------------------------------------------------------
 
@@ -429,6 +501,9 @@ func TestHandleChat_HappyPath(t *testing.T) {
 	if userCall.citations != nil {
 		t.Errorf("user turn must be persisted with nil citations, got %v", userCall.citations)
 	}
+	if userCall.trace != nil {
+		t.Errorf("user turn must be persisted with nil trace, got %v", userCall.trace)
+	}
 
 	assistantCall := sessions.appended[1]
 	if assistantCall.msg.Role != rag.RoleAssistant {
@@ -444,19 +519,36 @@ func TestHandleChat_HappyPath(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// TestHandleChat_StatusEventForwarded
+// TestHandleChat_TraceEventForwarded
 // ---------------------------------------------------------------------------
 
-// TestHandleChat_StatusEventForwarded verifies that pipeline status messages
-// are forwarded as "event: status" SSE frames before the token frames.
-func TestHandleChat_StatusEventForwarded(t *testing.T) {
+// TestHandleChat_TraceEventForwarded verifies that pipeline trace steps are forwarded
+// as "event: trace" SSE frames in order before the token frames, that the legacy
+// "event: status" frame is gone entirely, and that the accumulated trace is persisted
+// with the assistant turn.
+func TestHandleChat_TraceEventForwarded(t *testing.T) {
 	t.Parallel()
 
 	sessions := &stubSessions{}
 	pipeline := &stubPipeline{
-		statusMsgs: []string{"Reading resume.pdf…"},
-		tokens:     []string{"answer"},
-		citations:  []string{"resume.pdf"},
+		traceSteps: []rag.TraceStep{
+			{
+				Kind:  rag.TraceKindRetrieval,
+				Label: "Searched knowledge base",
+				Retrieval: &rag.RetrievalDetail{
+					ChunkCount:  1,
+					SourceCount: 1,
+					Excerpts:    []rag.GroundingExcerpt{{SourceName: "resume.pdf", Text: "grounding text"}},
+				},
+			},
+			{
+				Kind:     rag.TraceKindToolCall,
+				Label:    "Reading resume.pdf…",
+				ToolCall: &rag.ToolCallDetail{Tool: "fetch_full_document", Target: "resume.pdf", Outcome: "ok"},
+			},
+		},
+		tokens:    []string{"answer"},
+		citations: []string{"resume.pdf"},
 	}
 	srv := newTestServer(t, pipeline, sessions)
 
@@ -471,17 +563,39 @@ func TestHandleChat_StatusEventForwarded(t *testing.T) {
 
 	body := tf.Body.String()
 
-	if !strings.Contains(body, "event: status") {
-		t.Errorf("response body missing 'event: status' frame; got:\n%s", body)
+	if !strings.Contains(body, "event: trace") {
+		t.Errorf("response body missing 'event: trace' frame; got:\n%s", body)
 	}
-	if !strings.Contains(body, "Reading resume.pdf") {
-		t.Errorf("response body missing status message content; got:\n%s", body)
+	// The legacy status event must be gone.
+	if strings.Contains(body, "event: status") {
+		t.Errorf("response body must NOT contain the legacy 'event: status' frame; got:\n%s", body)
 	}
-	// Status must appear before the token frame.
-	statusIdx := strings.Index(body, "event: status")
+	if !strings.Contains(body, `"kind":"retrieval"`) {
+		t.Errorf("trace frame missing retrieval step; got:\n%s", body)
+	}
+	// Trace frames must appear before the token frame.
+	traceIdx := strings.Index(body, "event: trace")
 	tokenIdx := strings.Index(body, "event: token")
-	if statusIdx >= tokenIdx {
-		t.Errorf("status frame must precede token frame; statusIdx=%d tokenIdx=%d", statusIdx, tokenIdx)
+	if traceIdx >= tokenIdx {
+		t.Errorf("trace frame must precede token frame; traceIdx=%d tokenIdx=%d", traceIdx, tokenIdx)
+	}
+	// The two trace steps must appear in order.
+	retrievalIdx := strings.Index(body, `"kind":"retrieval"`)
+	toolCallIdx := strings.Index(body, `"kind":"tool_call"`)
+	if retrievalIdx == -1 || toolCallIdx == -1 || retrievalIdx >= toolCallIdx {
+		t.Errorf("trace steps out of order: retrievalIdx=%d toolCallIdx=%d", retrievalIdx, toolCallIdx)
+	}
+
+	// The assistant turn must persist the accumulated trace (both steps).
+	if len(sessions.appended) != 2 {
+		t.Fatalf("AppendMessage called %d time(s), want 2", len(sessions.appended))
+	}
+	assistantCall := sessions.appended[1]
+	if len(assistantCall.trace) != 2 {
+		t.Fatalf("assistant turn persisted %d trace steps, want 2", len(assistantCall.trace))
+	}
+	if assistantCall.trace[0].Kind != rag.TraceKindRetrieval {
+		t.Errorf("persisted trace[0].Kind: got %q, want %q", assistantCall.trace[0].Kind, rag.TraceKindRetrieval)
 	}
 }
 

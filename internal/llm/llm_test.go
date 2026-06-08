@@ -260,3 +260,193 @@ func TestRunTool_ListDocuments_Formatting(t *testing.T) {
 type testError struct{ msg string }
 
 func (e *testError) Error() string { return e.msg }
+
+// --- tool_call trace steps ---
+//
+// These exercise the runTool seam (StreamAnswer itself is unmockable — it drives the
+// live Anthropic SDK). The terminal "answer" step is NOT unit-tested here: it is emitted
+// only inside StreamAnswer's loop, and is covered indirectly via the pipeline stub
+// (internal/rag) and the SSE handler tests (internal/server).
+
+// captureTrace returns an onTrace callback plus a pointer to the slice it appends to.
+func captureTrace() (func(rag.TraceStep) error, *[]rag.TraceStep) {
+	var steps []rag.TraceStep
+	return func(s rag.TraceStep) error {
+		steps = append(steps, s)
+		return nil
+	}, &steps
+}
+
+// fetcherWith lets a test control GetFullText's return values.
+type fetcherWith struct {
+	text  string
+	found bool
+	err   error
+}
+
+func (f fetcherWith) GetFullText(_ context.Context, _ string) (string, bool, error) {
+	return f.text, f.found, f.err
+}
+
+// errLister returns an error from ListSources.
+type errLister struct{}
+
+func (errLister) ListSources(_ context.Context) ([]rag.DocumentInfo, error) {
+	return nil, &testError{"db down"}
+}
+
+func TestRunTool_EmitsToolCallStep_ListDocuments(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name        string
+		tools       rag.ToolSet
+		wantOutcome string
+	}{
+		{"ok", rag.ToolSet{Lister: stubLister{}}, outcomeOK},
+		{"error", rag.ToolSet{Lister: errLister{}}, outcomeError},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := newTestClient()
+			onTrace, steps := captureTrace()
+			tu := anthropic.ToolUseBlock{ID: "id", Name: toolListDocuments, Input: json.RawMessage(`{}`)}
+
+			c.runTool(context.Background(), tu, tc.tools, onTrace)
+
+			if len(*steps) != 1 {
+				t.Fatalf("trace steps: got %d, want 1", len(*steps))
+			}
+			s := (*steps)[0]
+			if s.Kind != rag.TraceKindToolCall || s.ToolCall == nil {
+				t.Fatalf("expected a tool_call step with detail, got %+v", s)
+			}
+			if s.ToolCall.Tool != toolListDocuments {
+				t.Errorf("Tool: got %q, want %q", s.ToolCall.Tool, toolListDocuments)
+			}
+			if s.ToolCall.Target != "" {
+				t.Errorf("Target must be empty for list_documents, got %q", s.ToolCall.Target)
+			}
+			if s.ToolCall.Outcome != tc.wantOutcome {
+				t.Errorf("Outcome: got %q, want %q", s.ToolCall.Outcome, tc.wantOutcome)
+			}
+		})
+	}
+}
+
+func TestRunTool_EmitsToolCallStep_FetchFullDocument(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name        string
+		fetcher     fetcherWith
+		input       string
+		wantOutcome string
+		wantTarget  string
+	}{
+		{"ok", fetcherWith{text: "full", found: true}, `{"source_name":"resume.pdf"}`, outcomeOK, "resume.pdf"},
+		{"not_found", fetcherWith{found: false}, `{"source_name":"ghost.pdf"}`, outcomeNotFound, "ghost.pdf"},
+		{"error", fetcherWith{err: &testError{"boom"}}, `{"source_name":"resume.pdf"}`, outcomeError, "resume.pdf"},
+		{"malformed", fetcherWith{}, `not-json`, outcomeError, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := newTestClient()
+			onTrace, steps := captureTrace()
+			tu := anthropic.ToolUseBlock{ID: "id", Name: toolFetchFullDocument, Input: json.RawMessage(tc.input)}
+
+			c.runTool(context.Background(), tu, rag.ToolSet{Fetcher: tc.fetcher}, onTrace)
+
+			if len(*steps) != 1 {
+				t.Fatalf("trace steps: got %d, want 1", len(*steps))
+			}
+			s := (*steps)[0]
+			if s.Kind != rag.TraceKindToolCall || s.ToolCall == nil {
+				t.Fatalf("expected a tool_call step with detail, got %+v", s)
+			}
+			if s.ToolCall.Tool != toolFetchFullDocument {
+				t.Errorf("Tool: got %q, want %q", s.ToolCall.Tool, toolFetchFullDocument)
+			}
+			if s.ToolCall.Target != tc.wantTarget {
+				t.Errorf("Target: got %q, want %q", s.ToolCall.Target, tc.wantTarget)
+			}
+			if s.ToolCall.Outcome != tc.wantOutcome {
+				t.Errorf("Outcome: got %q, want %q", s.ToolCall.Outcome, tc.wantOutcome)
+			}
+		})
+	}
+}
+
+// TestToolCallStep_EmailHasNoPII is a PII regression guard: the send_contact_email
+// trace step must NEVER carry the Viewer's name, email, message body, or refusal reason.
+// Target must always be empty and the Label must be the generic curated string.
+func TestToolCallStep_EmailHasNoPII(t *testing.T) {
+	t.Parallel()
+
+	const (
+		piiName  = "Alice Privacy"
+		piiEmail = "alice.private@example.com"
+		piiBody  = "TOP SECRET hire me immediately"
+	)
+	emailWithPII := func(confirmed bool) map[string]any {
+		return map[string]any{
+			"sender_name":     piiName,
+			"sender_email":    piiEmail,
+			"message":         piiBody,
+			"confirmed_draft": confirmed,
+		}
+	}
+
+	cases := []struct {
+		name        string
+		emailer     *stubEmailer
+		confirmed   bool
+		wantOutcome string
+	}{
+		{"success", &stubEmailer{ok: true}, true, outcomeOK},
+		{"unconfirmed", &stubEmailer{ok: true}, false, outcomeRefused},
+		{"refused", &stubEmailer{ok: false, reason: "rate limited: 1/session"}, true, outcomeRefused},
+		{"internal_error", &stubEmailer{err: &testError{"smtp creds leaked here"}}, true, outcomeError},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := newTestClient()
+			onTrace, steps := captureTrace()
+			tu := makeTU(emailWithPII(tc.confirmed))
+
+			c.runTool(context.Background(), tu, rag.ToolSet{Emailer: tc.emailer}, onTrace)
+
+			if len(*steps) != 1 {
+				t.Fatalf("trace steps: got %d, want 1", len(*steps))
+			}
+			s := (*steps)[0]
+			if s.Kind != rag.TraceKindToolCall || s.ToolCall == nil {
+				t.Fatalf("expected a tool_call step with detail, got %+v", s)
+			}
+			if s.ToolCall.Tool != toolSendContactEmail {
+				t.Errorf("Tool: got %q, want %q", s.ToolCall.Tool, toolSendContactEmail)
+			}
+			if s.ToolCall.Outcome != tc.wantOutcome {
+				t.Errorf("Outcome: got %q, want %q", s.ToolCall.Outcome, tc.wantOutcome)
+			}
+			// Curated label, empty target.
+			if s.Label != emailTraceLabel {
+				t.Errorf("Label: got %q, want curated %q", s.Label, emailTraceLabel)
+			}
+			if s.ToolCall.Target != "" {
+				t.Errorf("Target must be empty for send_contact_email, got %q", s.ToolCall.Target)
+			}
+			// No PII anywhere in the serialised step.
+			blob, err := json.Marshal(s)
+			if err != nil {
+				t.Fatalf("marshal step: %v", err)
+			}
+			for _, secret := range []string{piiName, piiEmail, piiBody, tc.emailer.reason} {
+				if secret != "" && strings.Contains(string(blob), secret) {
+					t.Errorf("PII leak: trace step contains %q\n  step JSON: %s", secret, blob)
+				}
+			}
+		})
+	}
+}

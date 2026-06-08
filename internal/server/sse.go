@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+
+	"github.com/Anthony-Bible/sre-bible/internal/rag"
 )
 
 type tokenPayload struct {
@@ -16,6 +18,11 @@ type donePayload struct {
 
 type msgPayload struct {
 	Msg string `json:"msg"`
+}
+
+// tracePayload wraps a single Agent Trace step for the "trace" SSE event.
+type tracePayload struct {
+	Step rag.TraceStep `json:"step"`
 }
 
 // writeSSE writes "event: <name>\ndata: <json>\n\n" and flushes.
@@ -50,9 +57,9 @@ func sseError(w http.ResponseWriter, f http.Flusher, msg string) error {
 	return writeSSE(w, f, "error", msgPayload{Msg: msg})
 }
 
-// sseStatus sends a transient status message to the client.
-// Status messages are informational (e.g. "Reading resume.pdf…") and are not
-// persisted to session history.
-func sseStatus(w http.ResponseWriter, f http.Flusher, msg string) error {
-	return writeSSE(w, f, "status", msgPayload{Msg: msg})
+// sseTrace sends a single Agent Trace step to the client as it is produced, so the
+// browser can render the live trace timeline incrementally. The same steps are also
+// persisted with the assistant turn, so the trace survives reload.
+func sseTrace(w http.ResponseWriter, f http.Flusher, step rag.TraceStep) error {
+	return writeSSE(w, f, "trace", tracePayload{Step: step})
 }

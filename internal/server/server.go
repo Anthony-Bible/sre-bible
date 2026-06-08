@@ -16,7 +16,7 @@ var templateFS embed.FS
 
 // Answerer is the port for streaming answers. Satisfied by *rag.Pipeline.
 type Answerer interface {
-	Answer(ctx context.Context, sessionID string, history []rag.Message, question string, onToken func(string) error, onStatus func(string) error) ([]string, error)
+	Answer(ctx context.Context, sessionID string, history []rag.Message, question string, onToken func(string) error, onTrace func(rag.TraceStep) error) ([]string, error)
 }
 
 // Pinger is the port for database liveness checks. Satisfied by *pgxpool.Pool.
@@ -24,11 +24,14 @@ type Pinger interface {
 	Ping(ctx context.Context) error
 }
 
-// StoredMessage is a Message with its persisted citation list, used for page rendering.
+// StoredMessage is a Message with its persisted citation list and Agent Trace,
+// used for page rendering. Trace is nil for user turns and legacy assistant rows
+// (NULL trace column); non-nil for assistant turns recorded with a trace.
 type StoredMessage struct {
 	rag.Message
 
 	Citations []string
+	Trace     []rag.TraceStep
 }
 
 // SessionRepository is the persistence port for anonymous chat sessions.
@@ -37,7 +40,7 @@ type StoredMessage struct {
 type SessionRepository interface {
 	CreateSession(ctx context.Context, sessionID string) error
 	ListMessages(ctx context.Context, sessionID string) ([]StoredMessage, error)
-	AppendMessage(ctx context.Context, sessionID string, msg rag.Message, citations []string) error
+	AppendMessage(ctx context.Context, sessionID string, msg rag.Message, citations []string, trace []rag.TraceStep) error
 	IsSessionVerified(ctx context.Context, sessionID string) (bool, error)
 	MarkSessionVerified(ctx context.Context, sessionID string) error
 }

@@ -45,9 +45,10 @@ type chatData struct {
 
 // messageDTO is the JSON shape returned by GET /messages.
 type messageDTO struct {
-	Role      string   `json:"role"`
-	Content   string   `json:"content"`
-	Citations []string `json:"citations"`
+	Role      string          `json:"role"`
+	Content   string          `json:"content"`
+	Citations []string        `json:"citations"`
+	Trace     []rag.TraceStep `json:"trace"`
 }
 
 // handleIndex renders the chat shell. History is loaded client-side via GET /messages.
@@ -83,10 +84,15 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		if citations == nil {
 			citations = []string{}
 		}
+		trace := sm.Trace
+		if trace == nil {
+			trace = []rag.TraceStep{}
+		}
 		dtos[i] = messageDTO{
 			Role:      string(sm.Role),
 			Content:   sm.Content,
 			Citations: citations,
+			Trace:     trace,
 		}
 	}
 
@@ -183,20 +189,25 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		history[i] = sm.Message
 	}
 
-	if err := s.sessions.AppendMessage(ctx, sid, rag.Message{Role: rag.RoleUser, Content: question}, nil); err != nil {
+	if err := s.sessions.AppendMessage(ctx, sid, rag.Message{Role: rag.RoleUser, Content: question}, nil, nil); err != nil {
 		s.log.ErrorContext(ctx, "append user message", slog.Any("err", err), slog.String("session", sid))
 		_ = sseError(w, flusher, "failed to save message")
 		return
 	}
 
 	var buf strings.Builder
-	onStatus := func(msg string) error {
-		return sseStatus(w, flusher, msg)
+	// Accumulate the trace for persistence AND forward each step live via SSE. The
+	// append happens before the write so a failed (disconnected) write still leaves the
+	// step persisted with the assistant turn.
+	var trace []rag.TraceStep
+	onTrace := func(step rag.TraceStep) error {
+		trace = append(trace, step)
+		return sseTrace(w, flusher, step)
 	}
 	citations, err := s.pipeline.Answer(ctx, sid, history, question, func(tok string) error {
 		buf.WriteString(tok)
 		return sseToken(w, flusher, tok)
-	}, onStatus)
+	}, onTrace)
 	if err != nil {
 		s.log.ErrorContext(ctx, "pipeline answer", slog.Any("err", err), slog.String("session", sid))
 		_ = sseError(w, flusher, "failed to generate response")
@@ -210,6 +221,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		sid,
 		rag.Message{Role: rag.RoleAssistant, Content: buf.String()},
 		citations,
+		trace,
 	); err != nil {
 		s.log.ErrorContext(persistCtx, "append assistant message", slog.Any("err", err), slog.String("session", sid))
 	}

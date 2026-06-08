@@ -66,15 +66,15 @@ func run(log *slog.Logger) error {
 	llmCli := llm.NewClient(anthropicKey, "claude-haiku-4-5", rag.SystemPrompt, log)
 	pipe := rag.NewPipeline(gemCli, store, llmCli, store, store, nil, 0, log)
 
-	onStatus := func(msg string) error {
-		_, err := fmt.Fprintf(os.Stderr, "[%s]\n", msg)
+	onTrace := func(step rag.TraceStep) error {
+		_, err := fmt.Fprintf(os.Stderr, "[trace] %s\n", traceSummary(step))
 		return err
 	}
 
 	citations, err := pipe.Answer(ctx, "", nil, question, func(tok string) error {
 		_, werr := fmt.Fprint(os.Stdout, tok)
 		return werr
-	}, onStatus)
+	}, onTrace)
 	if err != nil {
 		return fmt.Errorf("answer: %w", err)
 	}
@@ -84,4 +84,26 @@ func run(log *slog.Logger) error {
 		fmt.Fprintf(os.Stdout, "  [%s]\n", c)
 	}
 	return nil
+}
+
+// traceSummary renders one Agent Trace step as a single human-readable line for the CLI.
+func traceSummary(step rag.TraceStep) string {
+	switch step.Kind {
+	case rag.TraceKindRetrieval:
+		if step.Retrieval != nil {
+			return fmt.Sprintf("retrieval: %d chunks from %d sources", step.Retrieval.ChunkCount, step.Retrieval.SourceCount)
+		}
+	case rag.TraceKindToolCall:
+		if step.ToolCall != nil {
+			if step.ToolCall.Target != "" {
+				return fmt.Sprintf("tool_call: %s(%s) -> %s", step.ToolCall.Tool, step.ToolCall.Target, step.ToolCall.Outcome)
+			}
+			return fmt.Sprintf("tool_call: %s -> %s", step.ToolCall.Tool, step.ToolCall.Outcome)
+		}
+	case rag.TraceKindAnswer:
+		if step.Answer != nil {
+			return fmt.Sprintf("answer: %d tool round(s), %dms", step.Answer.ToolRounds, step.Answer.DurationMs)
+		}
+	}
+	return string(step.Kind) + ": " + step.Label
 }

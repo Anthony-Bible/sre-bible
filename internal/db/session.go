@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -40,9 +41,12 @@ func (s *SessionStore) CreateSession(ctx context.Context, sessionID string) erro
 }
 
 // ListMessages returns all messages for the session ordered by creation time.
+// A NULL trace column (user turns, legacy rows) yields a nil Trace. A trace that
+// fails to unmarshal is logged and degraded to nil so one corrupt row never fails
+// the whole list.
 func (s *SessionStore) ListMessages(ctx context.Context, sessionID string) ([]server.StoredMessage, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT role, content, citations
+		`SELECT role, content, citations, trace
 		 FROM messages
 		 WHERE session_id = $1
 		 ORDER BY created_at ASC`,
@@ -58,12 +62,22 @@ func (s *SessionStore) ListMessages(ctx context.Context, sessionID string) ([]se
 		var role string
 		var content string
 		var citations []string
-		if err := rows.Scan(&role, &content, &citations); err != nil {
+		var traceJSON []byte
+		if err := rows.Scan(&role, &content, &citations, &traceJSON); err != nil {
 			return nil, fmt.Errorf("scan message: %w", err)
+		}
+		var trace []rag.TraceStep
+		if len(traceJSON) > 0 {
+			if err := json.Unmarshal(traceJSON, &trace); err != nil {
+				s.logger.WarnContext(ctx, "unmarshal message trace; degrading to nil",
+					slog.Any("err", err), slog.String("session", sessionID))
+				trace = nil
+			}
 		}
 		msgs = append(msgs, server.StoredMessage{
 			Message:   rag.Message{Role: rag.Role(role), Content: content},
 			Citations: citations,
+			Trace:     trace,
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -74,13 +88,24 @@ func (s *SessionStore) ListMessages(ctx context.Context, sessionID string) ([]se
 
 // AppendMessage inserts a message into the session.
 // Pass nil citations for user messages; they are stored as an empty array.
-func (s *SessionStore) AppendMessage(ctx context.Context, sessionID string, msg rag.Message, citations []string) error {
+// Pass nil (or empty) trace for user messages and untraced turns; an empty trace is
+// stored as SQL NULL (distinguishing "no trace" from a recorded-but-empty trace).
+func (s *SessionStore) AppendMessage(ctx context.Context, sessionID string, msg rag.Message, citations []string, trace []rag.TraceStep) error {
 	if citations == nil {
 		citations = []string{}
 	}
+	var traceJSON []byte
+	if len(trace) > 0 {
+		b, err := json.Marshal(trace)
+		if err != nil {
+			return fmt.Errorf("marshal trace: %w", err)
+		}
+		traceJSON = b
+	}
+	// traceJSON == nil → pgx writes SQL NULL for the JSONB column.
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO messages (session_id, role, content, citations) VALUES ($1, $2, $3, $4)`,
-		sessionID, string(msg.Role), msg.Content, citations,
+		`INSERT INTO messages (session_id, role, content, citations, trace) VALUES ($1, $2, $3, $4, $5)`,
+		sessionID, string(msg.Role), msg.Content, citations, traceJSON,
 	)
 	if err != nil {
 		return fmt.Errorf("append message: %w", err)
