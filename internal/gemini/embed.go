@@ -28,11 +28,13 @@ func (c *Client) EmbedDocuments(ctx context.Context, texts []string) ([][]float3
 	}
 
 	dims := embeddingDims
-	resp, err := c.inner.Models.EmbedContent(ctx, embeddingModel, contents,
-		&genai.EmbedContentConfig{
-			TaskType:             "RETRIEVAL_DOCUMENT",
-			OutputDimensionality: &dims,
-		})
+	resp, err := retryEmbed(ctx, c.log, "embed_documents", func(ctx context.Context) (*genai.EmbedContentResponse, error) {
+		return c.inner.Models.EmbedContent(ctx, embeddingModel, contents,
+			&genai.EmbedContentConfig{
+				TaskType:             "RETRIEVAL_DOCUMENT",
+				OutputDimensionality: &dims,
+			})
+	})
 	if err != nil {
 		return nil, fmt.Errorf("embed content: %w", err)
 	}
@@ -55,11 +57,13 @@ func (c *Client) EmbedQuery(ctx context.Context, text string) ([]float32, error)
 	}
 
 	dims := embeddingDims
-	resp, err := c.inner.Models.EmbedContent(ctx, embeddingModel, []*genai.Content{content},
-		&genai.EmbedContentConfig{
-			TaskType:             "RETRIEVAL_QUERY",
-			OutputDimensionality: &dims,
-		})
+	resp, err := retryEmbed(ctx, c.log, "embed_query", func(ctx context.Context) (*genai.EmbedContentResponse, error) {
+		return c.inner.Models.EmbedContent(ctx, embeddingModel, []*genai.Content{content},
+			&genai.EmbedContentConfig{
+				TaskType:             "RETRIEVAL_QUERY",
+				OutputDimensionality: &dims,
+			})
+	})
 	if err != nil {
 		return nil, fmt.Errorf("embed query: %w", err)
 	}

@@ -78,6 +78,10 @@ const (
 	TraceKindToolCall TraceStepKind = "tool_call"
 	// TraceKindAnswer is the terminal step: total tool rounds + wall-clock duration.
 	TraceKindAnswer TraceStepKind = "answer"
+	// TraceKindNotice is a transient user-facing status message (e.g. "still searching…").
+	// Carries only Label — no detail struct — and is fired from long-running tool calls
+	// so the UI can surface progress without blocking on the tool result.
+	TraceKindNotice TraceStepKind = "notice"
 )
 
 // TraceStep is one entry in an Agent Trace — the persisted, ordered record of how

@@ -61,6 +61,17 @@ const (
 	matchConcurrency    = 4   // concurrent per-requirement retrievals
 )
 
+// slowMatchThreshold is how long match_job_description may run before a one-shot
+// notice trace step is emitted so the UI can show "still searching…". Sized to
+// cover one rate-limit backoff (≈1s) plus normal embed latency without nagging
+// the Viewer on fast runs.
+const slowMatchThreshold = 3 * time.Second
+
+// slowMatchNotice is the generic, PII-free label surfaced to the Viewer when a
+// match call crosses slowMatchThreshold (typically because the embedding API
+// rate-limited us and gemini.retryEmbed is backing off).
+const slowMatchNotice = "This is taking a bit longer than usual — still searching…"
+
 // send_contact_email field name constants.
 const (
 	fieldSenderName     = "sender_name"
@@ -511,6 +522,19 @@ func (c *Client) runMatchJobDescription(ctx context.Context, rawInput json.RawMe
 	}
 
 	start := time.Now()
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		t := time.NewTimer(slowMatchThreshold)
+		defer t.Stop()
+		select {
+		case <-done:
+		case <-ctx.Done():
+		case <-t.C:
+			emitTrace(onTrace, rag.TraceStep{Kind: rag.TraceKindNotice, Label: slowMatchNotice})
+		}
+	}()
+
 	chunksByReq := make([][]rag.RetrievedChunk, len(reqs))
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(matchConcurrency)

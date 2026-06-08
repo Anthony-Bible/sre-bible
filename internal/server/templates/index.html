@@ -202,6 +202,7 @@
         }
         .trace-step { line-height: 1.5; }
         .trace-step.trace-answer { color: #16a34a; }
+        .trace-step.trace-notice { color: #b45309; font-style: italic; }
 
         /* Grounding reveal — exact retrieved excerpt(s) behind a citation. */
         .grounding {
@@ -519,6 +520,9 @@
             if (step.kind === 'answer' && step.answer) {
                 const rounds = step.answer.tool_rounds || 0;
                 return `<li class="trace-step trace-answer">✓ ${label} — ${plural(rounds, 'tool round')}</li>`;
+            }
+            if (step.kind === 'notice') {
+                return `<li class="trace-step trace-notice">⏳ ${label}</li>`;
             }
             return `<li class="trace-step">${label}</li>`;
         }
