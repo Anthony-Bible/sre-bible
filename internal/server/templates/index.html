@@ -323,6 +323,7 @@
 
         /* Deadpool Theme visual overrides */
         body.deadpool-theme header { background: #dc2626; border-bottom: 2px solid #991b1b; }
+        body.deadpool-theme header p { color: #fee2e2; }
         body.deadpool-theme .message.user .msg-body { background: #dc2626; }
         body.deadpool-theme .citation[aria-expanded="true"] { background: #fee2e2; border-color: #fca5a5; color: #b91c1c; }
         body.deadpool-theme .grounding { border-left: 3px solid #dc2626; }
@@ -696,7 +697,6 @@
             if (lowerQ === '/deadpool' || lowerQ === 'chimichanga' || lowerQ === 'maximum effort') {
                 document.getElementById('question-input').value = '';
                 document.getElementById('question-input').style.height = 'auto';
-                document.getElementById('suggestions')?.remove();
                 
                 appendUserBubble(q);
                 sessionStorage.setItem('deadpool_mode', 'true');
@@ -714,7 +714,6 @@
             if (lowerQ === '/normal' || lowerQ === '/exit' || lowerQ === 'deadpool, put your pants back on') {
                 document.getElementById('question-input').value = '';
                 document.getElementById('question-input').style.height = 'auto';
-                document.getElementById('suggestions')?.remove();
                 
                 appendUserBubble(q);
                 sessionStorage.removeItem('deadpool_mode');
