@@ -97,7 +97,16 @@ DATABASE_URL=postgres://sre:sre@localhost:5432/sre_bible?sslmode=disable \
   make serve
 ```
 
-For local dev, use [Cloudflare's always-pass test keys](https://developers.cloudflare.com/turnstile/troubleshooting/testing/): site key `1x00000000000000000000AA`, secret `1x0000000000000000000000000000000AA`.
+For local dev, use [Cloudflare's always-pass test keys](https://developers.cloudflare.com/turnstile/troubleshooting/testing/): site key `1x00000000000000000000AA`, secret `1x0000000000000000000000000000000AA`. They open the gate on `localhost` (the real site key is domain-bound and will reject `localhost` / flag automation).
+
+**Sourcing real API keys.** The live Gemini/Anthropic keys are in the GKE secret `sre-bible-secrets`. To run locally against them, decode into a gitignored `.env` (do **not** echo the values):
+
+```bash
+kubectl get secret sre-bible-secrets -n sre-bible -o jsonpath='{.data.GEMINI_API_KEY}'    | base64 -d
+kubectl get secret sre-bible-secrets -n sre-bible -o jsonpath='{.data.ANTHROPIC_API_KEY}' | base64 -d
+```
+
+Keep `DATABASE_URL` pointed at the **local** container — never the production DB, since the server runs migrations and writes session rows at startup. The secret's own `DATABASE_URL` is production; override it. If a Postgres is already bound to `:5432`, `make serve` fails on its `db-up` step — reuse the running DB and start the server directly: `go run ./cmd/server` (it inherits the env / a sourced `.env`).
 
 ## Ingesting sources
 
@@ -117,6 +126,24 @@ Re-ingesting an existing source replaces it atomically (upsert + chunk replaceme
 make test              # all tests (requires DB running)
 make test-unit         # pure unit tests, no DB
 make test-integration  # DB-dependent packages only
+```
+
+### Manual UI verification
+
+The Go suite does not exercise the streaming UI — token streaming, the live **Agent Trace** panel, and citation grounding all run client-side over SSE (`POST /chat`). Verify those by hand against a running server with ingested sources:
+
+1. Start the server (see [Local development](#local-development)) and open `http://localhost:8080`.
+2. Ask a question, e.g. *"What are Anthony's biggest reliability wins?"*
+3. Expect, in order:
+   - tokens stream into the answer bubble as they arrive;
+   - a **🔍 Agent trace** panel is visible *above the answer while it streams* — the search step first, then any tool/answer steps as each round completes;
+   - on completion the trace collapses above the finalized answer and survives a page reload (history reloads via `GET /messages`);
+   - clicking a citation pill reveals the exact grounding excerpt.
+
+The live panel's visibility is streaming-only state a screenshot can race. For a deterministic check, sample its computed style from the devtools console while a query is in flight — it must flip to `block`, not stay `none`:
+
+```js
+getComputedStyle(document.getElementById('streaming-trace')).display // 'block' mid-stream, 'none' when idle
 ```
 
 ## Environment variables
