@@ -148,6 +148,9 @@
             border-radius: 0.6rem;
             padding: 0.35rem 0.6rem;
         }
+        /* When the trace leads the message (above the answer), move its spacing
+           below it so it sits flush with the message top and gaps to the body. */
+        .message.assistant .trace:first-child { margin-top: 0; margin-bottom: 0.4rem; }
         .trace > summary {
             cursor: pointer;
             list-style: none;
@@ -551,15 +554,20 @@
             const div = document.createElement('div');
             div.className = 'message assistant';
 
-            let inner = `<div class="msg-body">${safeMarkdown(text)}</div>`;
+            let inner = '';
 
-            // Agent trace panel — collapsed by default. Omit entirely when empty
-            // (legacy NULL rows / zero-step turns).
+            // Agent trace panel — rendered ABOVE the answer so the chronology
+            // reads search → answer, matching the live streaming layout (the
+            // live trace panel sits above the streaming bubble). Collapsed by
+            // default; omitted entirely when empty (legacy NULL rows / zero-step
+            // turns).
             if (trace.length > 0) {
                 const steps = trace.map(renderTraceStep).join('');
                 inner += `<details class="trace"><summary>${escapeHTML(traceSummary(trace))}</summary>` +
                     `<ol class="trace-steps">${steps}</ol></details>`;
             }
+
+            inner += `<div class="msg-body">${safeMarkdown(text)}</div>`;
 
             if (citations && citations.length > 0) {
                 const cHtml = citations.map((c, i) =>
