@@ -134,12 +134,21 @@ type FullTextFetcher interface {
 	GetFullText(ctx context.Context, name string) (text string, found bool, err error)
 }
 
+// JobMatcher retrieves the RetrievedChunks most relevant to a single Job
+// Description Requirement, for the match_job_description tool. k is the number of
+// chunks to retrieve; k<=0 selects an implementation default. An empty result is
+// normal and signals a Gap (no corpus evidence) to the caller — never an error.
+type JobMatcher interface {
+	MatchRequirement(ctx context.Context, requirement string, k int) ([]RetrievedChunk, error)
+}
+
 // ToolSet carries optional tool-use dependencies for the LLM generation step.
 // A nil field means the corresponding tool is not advertised to the model.
 type ToolSet struct {
 	Lister  DocumentLister
 	Fetcher FullTextFetcher
 	Emailer EmailSender
+	Matcher JobMatcher
 }
 
 // Generator streams a grounded answer token by token via onToken callback.

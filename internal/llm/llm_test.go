@@ -122,13 +122,13 @@ func TestRunTool_EmailSuccess(t *testing.T) {
 	tools := rag.ToolSet{Emailer: &stubEmailer{ok: true}}
 	tu := makeTU(emailInput(true))
 
-	text, isErr, sourceName := c.runTool(context.Background(), tu, tools, nil)
+	text, isErr, sources := c.runTool(context.Background(), tu, tools, nil)
 
 	if isErr {
 		t.Errorf("expected isErr=false on success, got true; text=%q", text)
 	}
-	if sourceName != "" {
-		t.Errorf("sourceName must be empty for email tool, got %q", sourceName)
+	if len(sources) != 0 {
+		t.Errorf("sources must be empty for email tool, got %v", sources)
 	}
 	if !strings.Contains(text, "sent") {
 		t.Errorf("success text should mention 'sent', got %q", text)
@@ -154,13 +154,13 @@ func TestRunTool_EmailRefusal(t *testing.T) {
 	tools := rag.ToolSet{Emailer: &stubEmailer{ok: false, reason: "already sent"}}
 	tu := makeTU(emailInput(true))
 
-	text, isErr, sourceName := c.runTool(context.Background(), tu, tools, nil)
+	text, isErr, sources := c.runTool(context.Background(), tu, tools, nil)
 
 	if !isErr {
 		t.Errorf("expected isErr=true for refusal, got false")
 	}
-	if sourceName != "" {
-		t.Errorf("sourceName must be empty, got %q", sourceName)
+	if len(sources) != 0 {
+		t.Errorf("sources must be empty, got %v", sources)
 	}
 	if text != "already sent" {
 		t.Errorf("refusal reason should be relayed verbatim, got %q", text)
@@ -241,13 +241,13 @@ func TestRunTool_ListDocuments_Formatting(t *testing.T) {
 			tools := rag.ToolSet{Lister: configuredLister{docs: tc.docs}}
 			tu := anthropic.ToolUseBlock{ID: "id", Name: toolListDocuments, Input: json.RawMessage(`{}`)}
 
-			text, isErr, sourceName := c.runTool(context.Background(), tu, tools, nil)
+			text, isErr, sources := c.runTool(context.Background(), tu, tools, nil)
 
 			if isErr {
 				t.Errorf("expected isErr=false, got true; text=%q", text)
 			}
-			if sourceName != "" {
-				t.Errorf("sourceName must be empty for list_documents, got %q", sourceName)
+			if len(sources) != 0 {
+				t.Errorf("sources must be empty for list_documents, got %v", sources)
 			}
 			got := strings.TrimRight(text, "\n")
 			if got != tc.wantLine {

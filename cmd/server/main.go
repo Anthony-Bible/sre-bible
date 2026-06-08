@@ -31,6 +31,7 @@ var (
 	_ server.Pinger            = (*pgxpool.Pool)(nil)
 	_ email.ContactRepository  = (*db.ContactStore)(nil)
 	_ rag.EmailSender          = (*email.BoundSender)(nil)
+	_ rag.JobMatcher           = (*rag.Matcher)(nil)
 	_ server.TurnstileVerifier = (*turnstile.Verifier)(nil)
 )
 
@@ -107,7 +108,8 @@ func run(log *slog.Logger) error {
 		return fmt.Errorf("setup emailer: %w", err)
 	}
 
-	pipeline := rag.NewPipeline(geminiClient, sourceStore, llmClient, sourceStore, sourceStore, emailerFactory, 0, log)
+	matcher := rag.NewMatcher(geminiClient, sourceStore)
+	pipeline := rag.NewPipeline(geminiClient, sourceStore, llmClient, sourceStore, sourceStore, matcher, emailerFactory, 0, log)
 
 	srv, err := server.NewServer(pipeline, sessionStore, pool, tsVerifier, turnstileSiteKey, log)
 	if err != nil {

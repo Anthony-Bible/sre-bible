@@ -54,9 +54,9 @@ func (g *stubGenerator) StreamAnswer(_ context.Context, messages []rag.Message, 
 	return g.fetchedNames, nil
 }
 
-// newPipe is a helper that builds a Pipeline with nil lister/fetcher/emailerFor (no tools).
+// newPipe is a helper that builds a Pipeline with nil lister/fetcher/matcher/emailerFor (no tools).
 func newPipe(searcher rag.ChunkSearcher, gen rag.Generator) *rag.Pipeline {
-	return rag.NewPipeline(stubEmbedder{}, searcher, gen, nil, nil, nil, 0, nil)
+	return rag.NewPipeline(stubEmbedder{}, searcher, gen, nil, nil, nil, nil, 0, nil)
 }
 
 func TestPipeline_EmptyChunkGuard(t *testing.T) {
@@ -157,7 +157,7 @@ func TestPipeline_ToolSetThreaded(t *testing.T) {
 
 	stubLister := &stubDocumentLister{docs: []rag.DocumentInfo{{Name: "resume.pdf", Type: "pdf"}}}
 	stubFetcher := &stubFullTextFetcher{text: "full text"}
-	pipe := rag.NewPipeline(stubEmbedder{}, stubSearcher{chunks: chunks}, gen, stubLister, stubFetcher, nil, 0, nil)
+	pipe := rag.NewPipeline(stubEmbedder{}, stubSearcher{chunks: chunks}, gen, stubLister, stubFetcher, nil, nil, 0, nil)
 
 	_, err := pipe.Answer(context.Background(), "", nil, "q?", func(string) error { return nil }, nil)
 	if err != nil {
@@ -169,6 +169,43 @@ func TestPipeline_ToolSetThreaded(t *testing.T) {
 	}
 	if gen.receivedTools.Fetcher == nil {
 		t.Error("ToolSet.Fetcher must be threaded through to generator")
+	}
+}
+
+// stubJobMatcher is a no-op JobMatcher for threading tests.
+type stubJobMatcher struct{}
+
+func (stubJobMatcher) MatchRequirement(_ context.Context, _ string, _ int) ([]rag.RetrievedChunk, error) {
+	return nil, nil
+}
+
+func TestPipeline_MatcherThreaded(t *testing.T) {
+	t.Parallel()
+
+	chunks := []rag.RetrievedChunk{{Content: "ctx", SourceName: "src"}}
+	gen := &stubGenerator{tokens: []string{"ok"}}
+	pipe := rag.NewPipeline(stubEmbedder{}, stubSearcher{chunks: chunks}, gen, nil, nil, stubJobMatcher{}, nil, 0, nil)
+
+	if _, err := pipe.Answer(context.Background(), "", nil, "q?", func(string) error { return nil }, nil); err != nil {
+		t.Fatalf("Answer: %v", err)
+	}
+	if gen.receivedTools.Matcher == nil {
+		t.Error("ToolSet.Matcher must be threaded through to generator when configured")
+	}
+}
+
+func TestPipeline_MatcherNilWhenUnconfigured(t *testing.T) {
+	t.Parallel()
+
+	chunks := []rag.RetrievedChunk{{Content: "ctx", SourceName: "src"}}
+	gen := &stubGenerator{tokens: []string{"ok"}}
+	pipe := newPipe(stubSearcher{chunks: chunks}, gen)
+
+	if _, err := pipe.Answer(context.Background(), "", nil, "q?", func(string) error { return nil }, nil); err != nil {
+		t.Fatalf("Answer: %v", err)
+	}
+	if gen.receivedTools.Matcher != nil {
+		t.Error("ToolSet.Matcher must be nil when no matcher is configured")
 	}
 }
 
@@ -371,7 +408,7 @@ func TestPipeline_EmailerFactoryReceivesSessionID(t *testing.T) {
 		gotSID = sid
 		return &stubEmailSender{}
 	}
-	pipe := rag.NewPipeline(stubEmbedder{}, stubSearcher{chunks: chunks}, gen, nil, nil, factory, 0, nil)
+	pipe := rag.NewPipeline(stubEmbedder{}, stubSearcher{chunks: chunks}, gen, nil, nil, nil, factory, 0, nil)
 
 	_, err := pipe.Answer(context.Background(), wantSID, nil, "q?", func(string) error { return nil }, nil)
 	if err != nil {

@@ -10,6 +10,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/Anthony-Bible/sre-bible/internal/email"
 	"github.com/Anthony-Bible/sre-bible/internal/rag"
@@ -29,17 +30,35 @@ const (
 // trace step. The Viewer's name, email, draft, and any refusal reason are NEVER recorded.
 const emailTraceLabel = "Drafted a message to Anthony"
 
+// matchTraceLabel is the generic, PII-free label recorded for every match_job_description
+// trace step. The Viewer's pasted requirement text is NEVER recorded — only this label,
+// an empty target, and the outcome.
+const matchTraceLabel = "Matched the job description against Anthony's background"
+
 const (
-	toolListDocuments     = "list_documents"
-	toolFetchFullDocument = "fetch_full_document"
-	toolSendContactEmail  = "send_contact_email"
+	toolListDocuments       = "list_documents"
+	toolFetchFullDocument   = "fetch_full_document"
+	toolSendContactEmail    = "send_contact_email"
+	toolMatchJobDescription = "match_job_description"
 )
 
 // schema map key constants (used in buildToolParams property maps).
 const (
 	schemaType        = "type"
 	schemaDescription = "description"
+	schemaItems       = "items"
 	schemaTypeString  = "string"
+	schemaTypeArray   = "array"
+)
+
+// match_job_description field name + bounds.
+const (
+	fieldRequirements   = "requirements"
+	maxRequirements     = 12  // token/DoS bound on requirements processed per call
+	maxRequirementChars = 200 // per-requirement input cap
+	maxEvidenceExcerpt  = 300 // per-evidence excerpt cap in the tool result
+	matchEvidenceK      = 4   // chunks retrieved per requirement
+	matchConcurrency    = 4   // concurrent per-requirement retrievals
 )
 
 // send_contact_email field name constants.
@@ -200,11 +219,9 @@ func (c *Client) collectToolResults(ctx context.Context, round int, acc anthropi
 		}
 		tu := cb.AsToolUse()
 		c.log.InfoContext(ctx, "tool use", "tool", tu.Name, "round", round+1)
-		text, isErr, sourceName := c.runTool(ctx, tu, tools, onTrace)
+		text, isErr, sources := c.runTool(ctx, tu, tools, onTrace)
 		results = append(results, anthropic.NewToolResultBlock(tu.ID, text, isErr))
-		if sourceName != "" {
-			fetchedNames = append(fetchedNames, sourceName)
-		}
+		fetchedNames = append(fetchedNames, sources...)
 	}
 	return results, fetchedNames
 }
@@ -236,7 +253,7 @@ func emitEmailToolCall(onTrace func(rag.TraceStep) error, outcome string) {
 
 // buildToolParams returns tool definitions for whichever ToolSet fields are non-nil.
 func buildToolParams(tools rag.ToolSet) []anthropic.ToolUnionParam {
-	result := make([]anthropic.ToolUnionParam, 0, 2)
+	result := make([]anthropic.ToolUnionParam, 0, 4)
 
 	if tools.Lister != nil {
 		t := anthropic.ToolParam{
@@ -261,6 +278,24 @@ func buildToolParams(tools rag.ToolSet) []anthropic.ToolUnionParam {
 					},
 				},
 				Required: []string{"source_name"},
+			},
+		}
+		result = append(result, anthropic.ToolUnionParam{OfTool: &t})
+	}
+
+	if tools.Matcher != nil {
+		t := anthropic.ToolParam{
+			Name:        toolMatchJobDescription,
+			Description: anthropic.String("Map a job description to Anthony's documented background. First extract the distinct requirements from the job description yourself, then pass them as the 'requirements' string array (call this at most once per turn); for each requirement the tool retrieves the most relevant evidence from Anthony's ingested documents and returns it alongside instructions for rendering a Fit Scorecard."),
+			InputSchema: anthropic.ToolInputSchemaParam{
+				Properties: map[string]any{
+					fieldRequirements: map[string]any{
+						schemaType:        schemaTypeArray,
+						schemaDescription: "The distinct requirements extracted from the job description, each a short phrase (e.g. \"5+ years operating Kubernetes in production\").",
+						schemaItems:       map[string]any{schemaType: schemaTypeString},
+					},
+				},
+				Required: []string{fieldRequirements},
 			},
 		}
 		result = append(result, anthropic.ToolUnionParam{OfTool: &t})
@@ -299,65 +334,67 @@ func buildToolParams(tools rag.ToolSet) []anthropic.ToolUnionParam {
 }
 
 // runTool dispatches a tool_use block and returns the result text, whether it is an
-// error, and (for successful fetch_full_document calls) the fetched source name.
+// error, and the source names to fold into citations (empty for tools that cite none).
 // Each branch emits exactly one tool_call TraceStep via onTrace with the curated label,
 // SAFE target, and mapped outcome.
-func (c *Client) runTool(ctx context.Context, tu anthropic.ToolUseBlock, tools rag.ToolSet, onTrace func(rag.TraceStep) error) (string, bool, string) {
+func (c *Client) runTool(ctx context.Context, tu anthropic.ToolUseBlock, tools rag.ToolSet, onTrace func(rag.TraceStep) error) (string, bool, []string) {
 	switch tu.Name {
 	case toolListDocuments:
 		return c.runListDocuments(ctx, tools, onTrace)
 	case toolFetchFullDocument:
 		return c.runFetchFullDocument(ctx, tu.Input, tools, onTrace)
+	case toolMatchJobDescription:
+		return c.runMatchJobDescription(ctx, tu.Input, tools, onTrace)
 	case toolSendContactEmail:
 		return c.runSendContactEmail(ctx, tu.Input, tools, onTrace)
 	default:
 		emitToolCall(onTrace, "Unknown tool", tu.Name, "", outcomeError)
-		return fmt.Sprintf("unknown tool: %s", tu.Name), true, ""
+		return fmt.Sprintf("unknown tool: %s", tu.Name), true, nil
 	}
 }
 
-func (c *Client) runListDocuments(ctx context.Context, tools rag.ToolSet, onTrace func(rag.TraceStep) error) (string, bool, string) {
+func (c *Client) runListDocuments(ctx context.Context, tools rag.ToolSet, onTrace func(rag.TraceStep) error) (string, bool, []string) {
 	const label = "Listing available documents…"
 	docs, err := tools.Lister.ListSources(ctx)
 	if err != nil {
 		emitToolCall(onTrace, label, toolListDocuments, "", outcomeError)
-		return fmt.Sprintf("error listing documents: %v", err), true, ""
+		return fmt.Sprintf("error listing documents: %v", err), true, nil
 	}
 	emitToolCall(onTrace, label, toolListDocuments, "", outcomeOK)
 	if len(docs) == 0 {
-		return "No documents are available in the knowledge base.", false, ""
+		return "No documents are available in the knowledge base.", false, nil
 	}
 	var sb strings.Builder
 	for _, d := range docs {
 		sb.WriteString(d.String())
 		sb.WriteByte('\n')
 	}
-	return sb.String(), false, ""
+	return sb.String(), false, nil
 }
 
-func (c *Client) runFetchFullDocument(ctx context.Context, rawInput json.RawMessage, tools rag.ToolSet, onTrace func(rag.TraceStep) error) (string, bool, string) {
+func (c *Client) runFetchFullDocument(ctx context.Context, rawInput json.RawMessage, tools rag.ToolSet, onTrace func(rag.TraceStep) error) (string, bool, []string) {
 	var input struct {
 		SourceName string `json:"source_name"`
 	}
 	if err := json.Unmarshal(rawInput, &input); err != nil {
 		emitToolCall(onTrace, "Reading document…", toolFetchFullDocument, "", outcomeError)
-		return fmt.Sprintf("invalid fetch_full_document arguments: %v", err), true, ""
+		return fmt.Sprintf("invalid fetch_full_document arguments: %v", err), true, nil
 	}
 	label := fmt.Sprintf("Reading %s…", input.SourceName)
 	text, found, err := tools.Fetcher.GetFullText(ctx, input.SourceName)
 	if err != nil {
 		emitToolCall(onTrace, label, toolFetchFullDocument, input.SourceName, outcomeError)
-		return fmt.Sprintf("error fetching document: %v", err), true, ""
+		return fmt.Sprintf("error fetching document: %v", err), true, nil
 	}
 	if !found {
 		emitToolCall(onTrace, label, toolFetchFullDocument, input.SourceName, outcomeNotFound)
-		return fmt.Sprintf("No document named %q is available (or it has no stored full text). Use list_documents to see valid names.", input.SourceName), false, ""
+		return fmt.Sprintf("No document named %q is available (or it has no stored full text). Use list_documents to see valid names.", input.SourceName), false, nil
 	}
 	emitToolCall(onTrace, label, toolFetchFullDocument, input.SourceName, outcomeOK)
-	return text, false, input.SourceName
+	return text, false, []string{input.SourceName}
 }
 
-func (c *Client) runSendContactEmail(ctx context.Context, rawInput json.RawMessage, tools rag.ToolSet, onTrace func(rag.TraceStep) error) (string, bool, string) {
+func (c *Client) runSendContactEmail(ctx context.Context, rawInput json.RawMessage, tools rag.ToolSet, onTrace func(rag.TraceStep) error) (string, bool, []string) {
 	var input struct {
 		SenderName     string `json:"sender_name"`
 		SenderEmail    string `json:"sender_email"`
@@ -369,11 +406,11 @@ func (c *Client) runSendContactEmail(ctx context.Context, rawInput json.RawMessa
 	// reason are never recorded.
 	if err := json.Unmarshal(rawInput, &input); err != nil {
 		emitEmailToolCall(onTrace, outcomeError)
-		return fmt.Sprintf("invalid send_contact_email arguments: %v", err), true, ""
+		return fmt.Sprintf("invalid send_contact_email arguments: %v", err), true, nil
 	}
 	if !input.ConfirmedDraft {
 		emitEmailToolCall(onTrace, outcomeRefused)
-		return "You must show the visitor a draft of the email and get their explicit confirmation before sending. Please present the draft and ask the visitor to confirm.", true, ""
+		return "You must show the visitor a draft of the email and get their explicit confirmation before sending. Please present the draft and ask the visitor to confirm.", true, nil
 	}
 	ok, reason, err := tools.Emailer.SendContactEmail(ctx, email.ContactEmail{
 		SenderName:  input.SenderName,
@@ -383,12 +420,139 @@ func (c *Client) runSendContactEmail(ctx context.Context, rawInput json.RawMessa
 	if err != nil {
 		c.log.ErrorContext(ctx, "send contact email", slog.Any("err", err))
 		emitEmailToolCall(onTrace, outcomeError)
-		return "The email could not be sent due to an internal error. Apologize briefly to the visitor and suggest they reach Anthony at linkedin.com/in/anthonybible/ instead.", true, ""
+		return "The email could not be sent due to an internal error. Apologize briefly to the visitor and suggest they reach Anthony at linkedin.com/in/anthonybible/ instead.", true, nil
 	}
 	if !ok {
 		emitEmailToolCall(onTrace, outcomeRefused)
-		return reason, true, ""
+		return reason, true, nil
 	}
 	emitEmailToolCall(onTrace, outcomeOK)
-	return "Your message was sent to Anthony successfully. Confirm this to the visitor.", false, ""
+	return "Your message was sent to Anthony successfully. Confirm this to the visitor.", false, nil
+}
+
+// matchEvidence is one cited excerpt supporting a requirement in the tool result.
+//
+// It deliberately mirrors rag.GroundingExcerpt in shape (excerpt text + source name)
+// but is intentionally NOT unified with it: the two live at different layers with
+// different wire formats and consumers. matchEvidence is serialised into the tool
+// result fed back to the model (json "excerpt"/"source"); rag.GroundingExcerpt is
+// persisted into the Agent Trace JSONB (json "text"/"source_name"). Sharing one struct
+// would couple the model-facing tool contract to the trace persistence schema, so the
+// duplicated shape is by design, not an oversight.
+type matchEvidence struct {
+	Excerpt string `json:"excerpt"`
+	Source  string `json:"source"`
+}
+
+// matchRequirementResult is the per-requirement evidence; empty Evidence is a Gap.
+type matchRequirementResult struct {
+	Requirement string          `json:"requirement"`
+	Evidence    []matchEvidence `json:"evidence"`
+}
+
+// matchJobResult is the structured tool result the model turns into a Fit Scorecard.
+// Instructions rides in the result (not the static tool schema) so the rendering recipe
+// sits next to the evidence it governs and is only spent when the tool actually runs.
+type matchJobResult struct {
+	Instructions string                   `json:"instructions"`
+	Requirements []matchRequirementResult `json:"requirements"`
+}
+
+// matchRenderInstructions tells the model how to turn the returned evidence into a Fit
+// Scorecard. It is returned in the tool result (the "tool response") rather than baked
+// into the tool description.
+const matchRenderInstructions = "Render this as a Fit Scorecard: a GitHub-flavored Markdown table with the columns Requirement | Match | Evidence. Classify each requirement from its evidence — Strong (clear, directly cited evidence), Partial (related but incomplete cited evidence), or Gap (no evidence). Cite a specific source for every evidence item; never fabricate evidence and never infer a Match from your own knowledge. Word every Gap neutrally (\"No supporting evidence in Anthony's documented background\"), making no claim either way about whether Anthony has the skill. After the table, give a brief overall fit summary, and when any Gap exists, invite the visitor to ask Anthony directly via the send_contact_email tool."
+
+// runMatchJobDescription retrieves grounded evidence for each pre-extracted
+// requirement (decomposition is the model's job, not the tool's) and returns a
+// structured JSON result plus the deduped source names for citations. It makes no
+// LLM call and never logs or traces requirement/JD text — only counts and duration.
+// It emits exactly one tool_call TraceStep with the generic matchTraceLabel, an empty
+// target, and the mapped outcome (the Viewer's requirement text never reaches the trace).
+func (c *Client) runMatchJobDescription(ctx context.Context, rawInput json.RawMessage, tools rag.ToolSet, onTrace func(rag.TraceStep) error) (string, bool, []string) {
+	var input struct {
+		Requirements []string `json:"requirements"`
+	}
+	if err := json.Unmarshal(rawInput, &input); err != nil {
+		emitToolCall(onTrace, matchTraceLabel, toolMatchJobDescription, "", outcomeError)
+		return fmt.Sprintf("invalid match_job_description arguments: %v", err), true, nil
+	}
+
+	reqs := make([]string, 0, len(input.Requirements))
+	for _, r := range input.Requirements {
+		if r = strings.TrimSpace(r); r != "" {
+			reqs = append(reqs, truncateText(r, maxRequirementChars))
+		}
+	}
+	if len(reqs) == 0 {
+		emitToolCall(onTrace, matchTraceLabel, toolMatchJobDescription, "", outcomeError)
+		return "No requirements provided. Extract the distinct requirements from the job description and pass them as the 'requirements' array.", true, nil
+	}
+	if len(reqs) > maxRequirements {
+		reqs = reqs[:maxRequirements]
+	}
+
+	start := time.Now()
+	chunksByReq := make([][]rag.RetrievedChunk, len(reqs))
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(matchConcurrency)
+	for i, req := range reqs {
+		g.Go(func() error {
+			chunks, err := tools.Matcher.MatchRequirement(gctx, req, matchEvidenceK)
+			if err != nil {
+				return err
+			}
+			chunksByReq[i] = chunks
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		c.log.ErrorContext(ctx, "match job description", slog.Any("err", err))
+		emitToolCall(onTrace, matchTraceLabel, toolMatchJobDescription, "", outcomeError)
+		return "The evidence search failed due to an internal error. Apologize briefly and suggest the visitor try again.", true, nil
+	}
+
+	var names []string
+	out := matchJobResult{Instructions: matchRenderInstructions, Requirements: make([]matchRequirementResult, len(reqs))}
+	for i, req := range reqs {
+		evidence := make([]matchEvidence, 0, len(chunksByReq[i]))
+		for _, ch := range chunksByReq[i] {
+			evidence = append(evidence, matchEvidence{
+				Excerpt: truncateText(ch.Content, maxEvidenceExcerpt),
+				Source:  ch.SourceName,
+			})
+			names = append(names, ch.SourceName)
+		}
+		out.Requirements[i] = matchRequirementResult{Requirement: req, Evidence: evidence}
+	}
+	// Deduped citation sources across all requirements, in first-seen order — the same
+	// attribution primitive the RAG pipeline uses for chunk citations.
+	sources := rag.DedupeSourceNames(names)
+
+	payload, err := json.Marshal(out)
+	if err != nil {
+		emitToolCall(onTrace, matchTraceLabel, toolMatchJobDescription, "", outcomeError)
+		return fmt.Sprintf("error encoding evidence: %v", err), true, nil
+	}
+
+	emitToolCall(onTrace, matchTraceLabel, toolMatchJobDescription, "", outcomeOK)
+	c.log.InfoContext(ctx, "match job description",
+		"requirements_count", len(reqs),
+		"sources_cited", len(sources),
+		"duration_ms", time.Since(start).Milliseconds(),
+	)
+	return string(payload), false, sources
+}
+
+// truncateText caps s to at most maxRunes runes, splitting on a rune boundary.
+func truncateText(s string, maxRunes int) string {
+	// Byte length bounds rune count, so a short string never needs conversion.
+	if len(s) <= maxRunes {
+		return s
+	}
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+	return string(runes[:maxRunes])
 }

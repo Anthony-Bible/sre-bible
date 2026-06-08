@@ -14,6 +14,7 @@ type Pipeline struct {
 	generator  Generator
 	lister     DocumentLister
 	fetcher    FullTextFetcher
+	matcher    JobMatcher
 	emailerFor EmailerFactory
 	k          int
 	log        *slog.Logger
@@ -22,8 +23,9 @@ type Pipeline struct {
 // NewPipeline creates a Pipeline. Pass k=0 to use defaultK (8).
 // lister and fetcher may be nil; when both are non-nil the model may invoke
 // the list_documents / fetch_full_document tools to escalate beyond chunks.
+// matcher may be nil; when non-nil, the match_job_description tool is advertised.
 // emailerFor may be nil; when non-nil, the send_contact_email tool is advertised.
-func NewPipeline(embedder QueryEmbedder, searcher ChunkSearcher, generator Generator, lister DocumentLister, fetcher FullTextFetcher, emailerFor EmailerFactory, k int, log *slog.Logger) *Pipeline {
+func NewPipeline(embedder QueryEmbedder, searcher ChunkSearcher, generator Generator, lister DocumentLister, fetcher FullTextFetcher, matcher JobMatcher, emailerFor EmailerFactory, k int, log *slog.Logger) *Pipeline {
 	if k <= 0 {
 		k = defaultK
 	}
@@ -36,6 +38,7 @@ func NewPipeline(embedder QueryEmbedder, searcher ChunkSearcher, generator Gener
 		generator:  generator,
 		lister:     lister,
 		fetcher:    fetcher,
+		matcher:    matcher,
 		emailerFor: emailerFor,
 		k:          k,
 		log:        log,
@@ -86,7 +89,7 @@ func (p *Pipeline) Answer(ctx context.Context, sessionID string, history []Messa
 	copy(messages, history)
 	messages[len(history)] = currentMsg
 
-	tools := ToolSet{Lister: p.lister, Fetcher: p.fetcher}
+	tools := ToolSet{Lister: p.lister, Fetcher: p.fetcher, Matcher: p.matcher}
 	if p.emailerFor != nil {
 		tools.Emailer = p.emailerFor(sessionID)
 	}
@@ -95,20 +98,14 @@ func (p *Pipeline) Answer(ctx context.Context, sessionID string, history []Messa
 		return nil, err
 	}
 
-	seen := make(map[string]struct{})
-	var citations []string
+	// Citations = vector-retrieved chunk sources first (in retrieval order), then any
+	// documents the model fetched via tools, all deduped by DedupeSourceNames.
+	names := make([]string, 0, len(chunks)+len(toolFetched))
 	for _, c := range chunks {
-		if _, ok := seen[c.SourceName]; !ok {
-			seen[c.SourceName] = struct{}{}
-			citations = append(citations, c.SourceName)
-		}
+		names = append(names, c.SourceName)
 	}
-	for _, name := range toolFetched {
-		if _, ok := seen[name]; !ok {
-			seen[name] = struct{}{}
-			citations = append(citations, name)
-		}
-	}
+	names = append(names, toolFetched...)
+	citations := DedupeSourceNames(names)
 
 	p.log.InfoContext(ctx, "query answered", "chunks", len(chunks), "citations", len(citations))
 	return citations, nil
@@ -120,18 +117,37 @@ func (p *Pipeline) Answer(ctx context.Context, sessionID string, history []Messa
 // so it serialises to a JSON array rather than null.
 func buildRetrievalStep(chunks []RetrievedChunk) TraceStep {
 	excerpts := make([]GroundingExcerpt, 0, len(chunks))
-	seen := make(map[string]struct{}, len(chunks))
+	names := make([]string, 0, len(chunks))
 	for _, c := range chunks {
 		excerpts = append(excerpts, GroundingExcerpt{SourceName: c.SourceName, Text: c.Content})
-		seen[c.SourceName] = struct{}{}
+		names = append(names, c.SourceName)
 	}
 	return TraceStep{
 		Kind:  TraceKindRetrieval,
 		Label: "Searched knowledge base",
 		Retrieval: &RetrievalDetail{
 			ChunkCount:  len(chunks),
-			SourceCount: len(seen),
+			SourceCount: len(DedupeSourceNames(names)),
 			Excerpts:    excerpts,
 		},
 	}
+}
+
+// DedupeSourceNames returns the distinct source names from names, preserving
+// first-seen order. It is the single citation-attribution primitive shared across
+// retrieval paths: Pipeline.Answer (chunk sources then tool-fetched docs), the
+// retrieval TraceStep's distinct-source count, and the match_job_description tool
+// (evidence sources across requirements) all build their source lists through it,
+// so every path attributes identically. Returns a non-nil empty slice for empty input.
+func DedupeSourceNames(names []string) []string {
+	seen := make(map[string]struct{}, len(names))
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		if _, ok := seen[n]; ok {
+			continue
+		}
+		seen[n] = struct{}{}
+		out = append(out, n)
+	}
+	return out
 }
