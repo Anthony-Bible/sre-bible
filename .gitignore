@@ -44,3 +44,4 @@ terraform.tfvars
 bin/
 /query
 /server
+brag-doc.txt
