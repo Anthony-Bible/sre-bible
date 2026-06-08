@@ -212,8 +212,8 @@ func (c *Client) collectToolResults(ctx context.Context, round int, acc anthropi
 // emitToolCall emits a tool_call TraceStep.
 //
 // PII rule: callers pass curated, PII-free labels and SAFE targets (document names only).
-// For send_contact_email, target is always "" — the Viewer's email, draft, and reason
-// are never passed here.
+// For send_contact_email, use emitEmailToolCall instead — it bakes in the PII-free label
+// and empty target so the Viewer's email, draft, and reason can never reach a trace.
 func emitToolCall(onTrace func(rag.TraceStep) error, label, tool, target, outcome string) {
 	emitTrace(onTrace, rag.TraceStep{
 		Kind:  rag.TraceKindToolCall,
@@ -224,6 +224,14 @@ func emitToolCall(onTrace func(rag.TraceStep) error, label, tool, target, outcom
 			Outcome: outcome,
 		},
 	})
+}
+
+// emitEmailToolCall emits the tool_call TraceStep for send_contact_email with only the
+// outcome varying. The PII-free label and empty target are hardcoded here so the email
+// path cannot leak the Viewer's name, address, message body, or any refusal reason into a
+// trace even by mistake — the structural enforcement of the PII rule, not just convention.
+func emitEmailToolCall(onTrace func(rag.TraceStep) error, outcome string) {
+	emitToolCall(onTrace, emailTraceLabel, toolSendContactEmail, "", outcome)
 }
 
 // buildToolParams returns tool definitions for whichever ToolSet fields are non-nil.
@@ -356,14 +364,15 @@ func (c *Client) runSendContactEmail(ctx context.Context, rawInput json.RawMessa
 		Message        string `json:"message"`
 		ConfirmedDraft bool   `json:"confirmed_draft"`
 	}
-	// Every trace step below uses the generic emailTraceLabel and an empty target —
-	// the Viewer's name, email, message body, and any refusal reason are never recorded.
+	// Every trace step below goes through emitEmailToolCall, which bakes in the generic
+	// label and empty target — the Viewer's name, email, message body, and any refusal
+	// reason are never recorded.
 	if err := json.Unmarshal(rawInput, &input); err != nil {
-		emitToolCall(onTrace, emailTraceLabel, toolSendContactEmail, "", outcomeError)
+		emitEmailToolCall(onTrace, outcomeError)
 		return fmt.Sprintf("invalid send_contact_email arguments: %v", err), true, ""
 	}
 	if !input.ConfirmedDraft {
-		emitToolCall(onTrace, emailTraceLabel, toolSendContactEmail, "", outcomeRefused)
+		emitEmailToolCall(onTrace, outcomeRefused)
 		return "You must show the visitor a draft of the email and get their explicit confirmation before sending. Please present the draft and ask the visitor to confirm.", true, ""
 	}
 	ok, reason, err := tools.Emailer.SendContactEmail(ctx, email.ContactEmail{
@@ -373,13 +382,13 @@ func (c *Client) runSendContactEmail(ctx context.Context, rawInput json.RawMessa
 	})
 	if err != nil {
 		c.log.ErrorContext(ctx, "send contact email", slog.Any("err", err))
-		emitToolCall(onTrace, emailTraceLabel, toolSendContactEmail, "", outcomeError)
+		emitEmailToolCall(onTrace, outcomeError)
 		return "The email could not be sent due to an internal error. Apologize briefly to the visitor and suggest they reach Anthony at linkedin.com/in/anthonybible/ instead.", true, ""
 	}
 	if !ok {
-		emitToolCall(onTrace, emailTraceLabel, toolSendContactEmail, "", outcomeRefused)
+		emitEmailToolCall(onTrace, outcomeRefused)
 		return reason, true, ""
 	}
-	emitToolCall(onTrace, emailTraceLabel, toolSendContactEmail, "", outcomeOK)
+	emitEmailToolCall(onTrace, outcomeOK)
 	return "Your message was sent to Anthony successfully. Confirm this to the visitor.", false, ""
 }
