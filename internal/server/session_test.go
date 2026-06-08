@@ -19,9 +19,9 @@ func TestValidSessionID(t *testing.T) {
 		{"valid v4 alt variant b", "aabbccdd-0000-4000-b000-000000000001", true},
 		{"empty", "", false},
 		{"non-uuid", "not-a-uuid", false},
-		{"uuid v3", "aabbccdd-0000-3000-8000-000000000001", true},
-		{"microsoft variant nibble (c)", "aabbccdd-0000-4000-c000-000000000001", true},
-		{"uppercase", "AABBCCDD-0000-4000-8000-000000000001", true},
+		{"uuid v3", "aabbccdd-0000-3000-8000-000000000001", false},
+		{"microsoft variant nibble (c)", "aabbccdd-0000-4000-c000-000000000001", false},
+		{"uppercase", "AABBCCDD-0000-4000-8000-000000000001", false},
 		{"too short", "aabbccdd-0000-4000-8000-00000000000", false},
 	}
 

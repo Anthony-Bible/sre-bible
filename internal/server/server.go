@@ -43,6 +43,8 @@ type SessionRepository interface {
 	AppendMessage(ctx context.Context, sessionID string, msg rag.Message, citations []string, trace []rag.TraceStep) error
 	IsSessionVerified(ctx context.Context, sessionID string) (bool, error)
 	MarkSessionVerified(ctx context.Context, sessionID string) error
+	SetDeadpoolMode(ctx context.Context, sessionID string, enabled bool) error
+	IsDeadpoolMode(ctx context.Context, sessionID string) (bool, error)
 }
 
 // TurnstileVerifier is the port for verifying Cloudflare Turnstile tokens.

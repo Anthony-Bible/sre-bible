@@ -19,15 +19,19 @@ import (
 
 // stubSessions implements SessionRepository with controllable behavior.
 type stubSessions struct {
-	createErr       error
-	listErr         error
-	appendErr       error
-	messages        []StoredMessage
-	appended        []appendedCall
-	isVerified      bool
-	verifyErr       error
-	markVerifiedErr error
-	markCalls       int
+	createErr        error
+	listErr          error
+	appendErr        error
+	messages         []StoredMessage
+	appended         []appendedCall
+	isVerified       bool
+	verifyErr        error
+	markVerifiedErr  error
+	markCalls        int
+	deadpoolMode     bool
+	isDeadpoolErr    error
+	setDeadpoolErr   error
+	setDeadpoolCalls []bool
 }
 
 type appendedCall struct {
@@ -57,6 +61,16 @@ func (s *stubSessions) IsSessionVerified(_ context.Context, _ string) (bool, err
 func (s *stubSessions) MarkSessionVerified(_ context.Context, _ string) error {
 	s.markCalls++
 	return s.markVerifiedErr
+}
+
+func (s *stubSessions) SetDeadpoolMode(_ context.Context, _ string, enabled bool) error {
+	s.deadpoolMode = enabled
+	s.setDeadpoolCalls = append(s.setDeadpoolCalls, enabled)
+	return s.setDeadpoolErr
+}
+
+func (s *stubSessions) IsDeadpoolMode(_ context.Context, _ string) (bool, error) {
+	return s.deadpoolMode, s.isDeadpoolErr
 }
 
 // stubTurnstile implements TurnstileVerifier with controllable behavior.
@@ -749,3 +763,95 @@ func TestHandleChat_Turnstile_AlreadyVerified(t *testing.T) {
 		t.Errorf("Verify called %d time(s) for already-verified session, want 0", ts.callCount)
 	}
 }
+
+// TestResolvePersonaMode_Optimization verifies that resolvePersonaMode avoids redundant DB writes
+// when the requested Deadpool Mode preference is already equal to the stored preference.
+func TestResolvePersonaMode_Optimization(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		headerVal       string
+		queryVal        string
+		initialDBState  bool
+		wantDBWrites    []bool // expected sequence of calls to SetDeadpoolMode
+		wantCtxDeadpool bool
+	}{
+		{
+			name:            "toggles deadpool mode on if requested and was off",
+			headerVal:       "true",
+			initialDBState:  false,
+			wantDBWrites:    []bool{true},
+			wantCtxDeadpool: true,
+		},
+		{
+			name:            "noop if deadpool mode requested and already on",
+			headerVal:       "true",
+			initialDBState:  true,
+			wantDBWrites:    nil,
+			wantCtxDeadpool: true,
+		},
+		{
+			name:            "toggles deadpool mode off if requested and was on",
+			headerVal:       "false",
+			initialDBState:  true,
+			wantDBWrites:    []bool{false},
+			wantCtxDeadpool: false,
+		},
+		{
+			name:            "noop if standard mode requested and already off",
+			headerVal:       "false",
+			initialDBState:  false,
+			wantDBWrites:    nil,
+			wantCtxDeadpool: false,
+		},
+		{
+			name:            "noop if no preference header or query param provided",
+			headerVal:       "",
+			initialDBState:  true,
+			wantDBWrites:    nil,
+			wantCtxDeadpool: true, // stays true because db was true
+		},
+		{
+			name:            "toggles deadpool mode on via query parameter",
+			queryVal:        "deadpool",
+			initialDBState:  false,
+			wantDBWrites:    []bool{true},
+			wantCtxDeadpool: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			sessions := &stubSessions{
+				deadpoolMode: tc.initialDBState,
+			}
+			srv := newTestServer(t, &stubPipeline{}, sessions)
+
+			urlStr := "/messages"
+			if tc.queryVal != "" {
+				urlStr += "?mode=" + tc.queryVal
+			}
+			req := httptest.NewRequest(http.MethodGet, urlStr, nil)
+			req.Header.Set(sessionHeader, validSessionFixture)
+			if tc.headerVal != "" {
+				req.Header.Set("X-Deadpool-Mode", tc.headerVal)
+			}
+
+			rr := httptest.NewRecorder()
+			srv.ServeHTTP(rr, req)
+
+			if len(sessions.setDeadpoolCalls) != len(tc.wantDBWrites) {
+				t.Fatalf("SetDeadpoolMode calls = %v, want %v", sessions.setDeadpoolCalls, tc.wantDBWrites)
+			}
+			for i, call := range sessions.setDeadpoolCalls {
+				if call != tc.wantDBWrites[i] {
+					t.Errorf("SetDeadpoolMode call %d = %v, want %v", i, call, tc.wantDBWrites[i])
+				}
+			}
+		})
+	}
+}
+

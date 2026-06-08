@@ -320,6 +320,17 @@
             .message { max-width: 96%; }
             #chat-container { padding: 0.75rem 0.75rem 0; }
         }
+
+        /* Deadpool Theme visual overrides */
+        body.deadpool-theme header { background: #dc2626; border-bottom: 2px solid #991b1b; }
+        body.deadpool-theme .message.user .msg-body { background: #dc2626; }
+        body.deadpool-theme .citation[aria-expanded="true"] { background: #fee2e2; border-color: #fca5a5; color: #b91c1c; }
+        body.deadpool-theme .grounding { border-left: 3px solid #dc2626; }
+        body.deadpool-theme .grounding-source { color: #dc2626; }
+        body.deadpool-theme #send-btn { background: #dc2626; }
+        body.deadpool-theme #send-btn:hover:not(:disabled) { background: #b91c1c; }
+        body.deadpool-theme #send-btn:disabled { background: #fca5a5; }
+        body.deadpool-theme .streaming-cursor::after { color: #dc2626; }
     </style>
 </head>
 <body>
@@ -367,6 +378,28 @@
             return DOMPurify.sanitize(marked.parse(text));
         }
 
+        // --- Deadpool Theme & State -----------------------------------
+        const urlParams = new URLSearchParams(window.location.search);
+        const modeQuery = urlParams.get('mode');
+        if (modeQuery === 'deadpool') {
+            sessionStorage.setItem('deadpool_mode', 'true');
+        } else if (modeQuery === 'normal') {
+            sessionStorage.removeItem('deadpool_mode');
+        }
+
+        function getDeadpoolHeader() {
+            return sessionStorage.getItem('deadpool_mode') === 'true' ? 'true' : 'false';
+        }
+
+        function applyDeadpoolTheme() {
+            const isDeadpool = sessionStorage.getItem('deadpool_mode') === 'true';
+            if (isDeadpool) {
+                document.body.classList.add('deadpool-theme');
+            } else {
+                document.body.classList.remove('deadpool-theme');
+            }
+        }
+
         function getSessionId() {
             let id = sessionStorage.getItem('sre_session_id');
             if (!id) { id = crypto.randomUUID(); sessionStorage.setItem('sre_session_id', id); }
@@ -375,7 +408,14 @@
 
         async function restoreHistory() {
             let resp;
-            try { resp = await fetch('/messages', { headers: { 'X-Session-Id': getSessionId() } }); }
+            try {
+                resp = await fetch('/messages', {
+                    headers: {
+                        'X-Session-Id': getSessionId(),
+                        'X-Deadpool-Mode': getDeadpoolHeader()
+                    }
+                });
+            }
             catch { return; }
             if (!resp.ok) return;
             const msgs = await resp.json();
@@ -390,6 +430,7 @@
         }
 
         document.addEventListener('DOMContentLoaded', () => {
+            applyDeadpoolTheme();
             restoreHistory();
 
             const textarea = document.getElementById('question-input');
@@ -650,6 +691,45 @@
             const q = document.getElementById('question-input').value.trim();
             if (!q) return;
 
+            // Intercept text commands purely client-side
+            const lowerQ = q.toLowerCase();
+            if (lowerQ === '/deadpool' || lowerQ === 'chimichanga' || lowerQ === 'maximum effort') {
+                document.getElementById('question-input').value = '';
+                document.getElementById('question-input').style.height = 'auto';
+                document.getElementById('suggestions')?.remove();
+                
+                appendUserBubble(q);
+                sessionStorage.setItem('deadpool_mode', 'true');
+                applyDeadpoolTheme();
+                
+                setTimeout(() => {
+                    finalizeStreamingBubble(
+                        "**BUSTS THROUGH THE IFRAME NAKED EXCEPT FOR STRATEGICALLY PLACED CHIMICHANGAS!** 💥 🌮\n\nDid someone order an elite SRE with a side of absolute chaos? Deadpool Mode is officially **ACTIVE**, baby! Ask me anything about Anthony's resume, and I'll tell you the absolute truth—wrapped in delicious, red-spandex-clad sarcasm! Maximum effort!",
+                        [],
+                        []
+                    );
+                }, 400);
+                return;
+            }
+            if (lowerQ === '/normal' || lowerQ === '/exit' || lowerQ === 'deadpool, put your pants back on') {
+                document.getElementById('question-input').value = '';
+                document.getElementById('question-input').style.height = 'auto';
+                document.getElementById('suggestions')?.remove();
+                
+                appendUserBubble(q);
+                sessionStorage.removeItem('deadpool_mode');
+                applyDeadpoolTheme();
+                
+                setTimeout(() => {
+                    finalizeStreamingBubble(
+                        "*pouts dramatically* Fine, party pooper! Ditching the spandex and putting my boring corporate slacks back on. Resume Agent is back in standard, polite, and thoroughly professional mode.",
+                        [],
+                        []
+                    );
+                }, 400);
+                return;
+            }
+
             document.getElementById('question-input').value = '';
             document.getElementById('question-input').style.height = 'auto';
             document.getElementById('suggestions')?.remove();
@@ -670,6 +750,7 @@
                     headers: {
                         'Content-Type': 'application/x-www-form-urlencoded',
                         'X-Session-Id': getSessionId(),
+                        'X-Deadpool-Mode': getDeadpoolHeader(),
                     },
                     body: params,
                 });

@@ -101,7 +101,11 @@ func run(log *slog.Logger) error {
 
 	sourceStore := db.NewSourceStore(pool, log)
 	sessionStore := db.NewSessionStore(pool, log)
-	llmClient := llm.NewClient(anthropicKey, model, rag.SystemPrompt, log)
+	personas := map[rag.PersonaMode]string{
+		rag.ModeStandard: rag.StandardPersona,
+		rag.ModeDeadpool: rag.DeadpoolPersona,
+	}
+	llmClient := llm.NewClient(anthropicKey, model, rag.BaseSystemPrompt, personas, log)
 
 	var emailerFactory rag.EmailerFactory
 	if err := setupEmailer(ctx, pool, log, &emailerFactory); err != nil {
