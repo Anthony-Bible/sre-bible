@@ -142,6 +142,78 @@ func (s *SessionStore) MarkSessionVerified(ctx context.Context, sessionID string
 	return nil
 }
 
+// GetInterviewState returns the persisted interview state for the session.
+// Returns (nil, nil) when the session does not exist or interview_state is SQL NULL.
+func (s *SessionStore) GetInterviewState(ctx context.Context, sessionID string) (*rag.InterviewState, error) {
+	var raw []byte
+	err := s.pool.QueryRow(ctx,
+		`SELECT interview_state FROM sessions WHERE id = $1`,
+		sessionID,
+	).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get interview state: %w", err)
+	}
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var state rag.InterviewState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		return nil, fmt.Errorf("unmarshal interview state: %w", err)
+	}
+	return &state, nil
+}
+
+// SetInterviewState persists state and marks the session's interview as active.
+func (s *SessionStore) SetInterviewState(ctx context.Context, sessionID string, state *rag.InterviewState) error {
+	if state == nil {
+		return errors.New("interview state is nil")
+	}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		return fmt.Errorf("marshal interview state: %w", err)
+	}
+	_, err = s.pool.Exec(ctx,
+		`UPDATE sessions SET interview_state = $1, interview_active = true WHERE id = $2`,
+		raw, sessionID,
+	)
+	if err != nil {
+		return fmt.Errorf("set interview state: %w", err)
+	}
+	return nil
+}
+
+// ClearInterviewState clears the persisted interview state and marks it inactive.
+func (s *SessionStore) ClearInterviewState(ctx context.Context, sessionID string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE sessions SET interview_state = NULL, interview_active = false WHERE id = $1`,
+		sessionID,
+	)
+	if err != nil {
+		return fmt.Errorf("clear interview state: %w", err)
+	}
+	return nil
+}
+
+// IsInterviewActive returns true when the session has an active interview.
+// Returns (false, nil) if the session does not exist.
+func (s *SessionStore) IsInterviewActive(ctx context.Context, sessionID string) (bool, error) {
+	var active bool
+	err := s.pool.QueryRow(ctx,
+		`SELECT interview_active FROM sessions WHERE id = $1`,
+		sessionID,
+	).Scan(&active)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("is interview active: %w", err)
+	}
+	return active, nil
+}
+
 // SetDeadpoolMode sets the deadpool_mode column for the given session.
 func (s *SessionStore) SetDeadpoolMode(ctx context.Context, sessionID string, enabled bool) error {
 	_, err := s.pool.Exec(ctx,

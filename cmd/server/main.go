@@ -33,6 +33,7 @@ var (
 	_ rag.EmailSender          = (*email.BoundSender)(nil)
 	_ rag.JobMatcher           = (*rag.Matcher)(nil)
 	_ server.TurnstileVerifier = (*turnstile.Verifier)(nil)
+	_ rag.InterviewStateStore  = (*db.SessionStore)(nil)
 )
 
 func main() {
