@@ -149,6 +149,32 @@ func (s *SourceStore) SearchChunks(ctx context.Context, queryEmbedding []float32
 	return results, nil
 }
 
+// AllSourcesWithText returns every source that has stored full text, as complete
+// ingest.Source values (name, type, location, full_text, description), ordered by
+// name. Sources with NULL full_text are skipped — they cannot be rechunked. It
+// backs the `ingest rechunk` repair path, which re-segments FullText in place.
+func (s *SourceStore) AllSourcesWithText(ctx context.Context) ([]ingest.Source, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT name, type, location, full_text, COALESCE(description, '')
+		FROM   sources
+		WHERE  full_text IS NOT NULL AND full_text <> ''
+		ORDER  BY name`)
+	if err != nil {
+		return nil, fmt.Errorf("list sources with text: %w", err)
+	}
+	srcs, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (ingest.Source, error) {
+		var src ingest.Source
+		if err := row.Scan(&src.Name, &src.Type, &src.Location, &src.FullText, &src.Description); err != nil {
+			return src, err
+		}
+		return src, nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("scan source rows: %w", err)
+	}
+	return srcs, nil
+}
+
 // ListSources returns the name, type, and description of every source, ordered by name.
 func (s *SourceStore) ListSources(ctx context.Context) ([]rag.DocumentInfo, error) {
 	rows, err := s.pool.Query(ctx, `SELECT name, type, description FROM sources ORDER BY name`)

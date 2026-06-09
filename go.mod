@@ -8,10 +8,10 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.41.12
 	github.com/aws/aws-sdk-go-v2/credentials v1.17.27
 	github.com/aws/aws-sdk-go-v2/service/sesv2 v1.62.3
-	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.7.0
 	github.com/pgvector/pgvector-go v0.2.2
 	github.com/pressly/goose/v3 v3.22.0
+	github.com/spf13/pflag v1.0.10
 	golang.org/x/sync v0.16.0
 	google.golang.org/genai v1.59.0
 )

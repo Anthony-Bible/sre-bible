@@ -113,35 +113,74 @@ func (p *Pipeline) Run(ctx context.Context, location string) error {
 		return err
 	}
 
+	src := Source{Name: name, Type: srcType, Location: location, FullText: text, Description: description}
+	n, err := p.buildAndStore(ctx, src, segments, embeddings)
+	if err != nil {
+		return err
+	}
+
+	p.log.InfoContext(ctx, "source ingested", "name", name, "chunks", n)
+	return nil
+}
+
+// buildAndStore pairs each segment with its embedding into a Chunk and atomically
+// replaces src's stored chunks via ReplaceSource. It is the shared tail of Run
+// (full ingest) and Rechunk (repair); the embeddings slice must align with
+// segments by index. Returns the number of chunks written.
+func (p *Pipeline) buildAndStore(ctx context.Context, src Source, segments []string, embeddings [][]float32) (int, error) {
 	if len(embeddings) != len(segments) {
-		return fmt.Errorf("embed %s: got %d embeddings for %d chunks", name, len(embeddings), len(segments))
+		return 0, fmt.Errorf("embed %s: got %d embeddings for %d chunks", src.Name, len(embeddings), len(segments))
 	}
 
 	chunks := make([]Chunk, len(segments))
 	for i, seg := range segments {
-		chunks[i] = Chunk{
-			Idx:       i,
-			Content:   seg,
-			Embedding: embeddings[i],
-		}
+		chunks[i] = Chunk{Idx: i, Content: seg, Embedding: embeddings[i]}
 	}
 
-	src := Source{Name: name, Type: srcType, Location: location, FullText: text, Description: description}
 	if err := p.store.ReplaceSource(ctx, src, chunks); err != nil {
-		return fmt.Errorf("store source %s: %w", name, err)
+		return 0, fmt.Errorf("store source %s: %w", src.Name, err)
+	}
+	return len(chunks), nil
+}
+
+// Rechunk re-segments an existing source from its already-extracted FullText and
+// atomically replaces its stored chunks — without re-extracting, re-screening for
+// PII, or re-describing. It exists to repair sources chunked by an older, buggy
+// splitter: src.Name, Type, Location, and Description are persisted verbatim, so
+// only the chunk rows (content + embeddings) change. FullText must be present
+// (it is the sole input); a source with no stored full text cannot be rechunked.
+// Returns the number of chunks written.
+func (p *Pipeline) Rechunk(ctx context.Context, src Source) (int, error) {
+	if src.FullText == "" {
+		return 0, fmt.Errorf("rechunk %s: no stored full text", src.Name)
 	}
 
-	p.log.InfoContext(ctx, "source ingested", "name", name, "chunks", len(chunks))
-	return nil
+	segments := ChunkText(src.FullText)
+	if len(segments) == 0 {
+		return 0, fmt.Errorf("rechunk %s: chunking produced no segments", src.Name)
+	}
+
+	embeddings, err := p.embedder.EmbedDocuments(ctx, segments)
+	if err != nil {
+		return 0, fmt.Errorf("embed chunks for %s: %w", src.Name, err)
+	}
+
+	n, err := p.buildAndStore(ctx, src, segments, embeddings)
+	if err != nil {
+		return 0, err
+	}
+
+	p.log.InfoContext(ctx, "source rechunked", "name", src.Name, "chunks", n)
+	return n, nil
 }
 
 func (p *Pipeline) extractText(ctx context.Context, srcType, location string) (string, error) {
 	switch srcType {
-	case "pdf":
+	case sourceTypePDF:
 		return p.pdfExtractor.ExtractPDFText(ctx, location)
-	case "url":
+	case sourceTypeURL:
 		return p.urlExtractor.ExtractURL(ctx, location)
-	case "text":
+	case sourceTypeText:
 		data, err := os.ReadFile(location)
 		if err != nil {
 			return "", fmt.Errorf("read text file: %w", err)
