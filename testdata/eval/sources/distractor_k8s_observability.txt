@@ -1,0 +1,46 @@
+A Practical Guide to Kubernetes Observability
+
+This is a general technical reference for instrumenting workloads running on
+Kubernetes. It is not tied to any company, platform, or engineer.
+
+THE THREE SIGNALS
+
+Observability on Kubernetes rests on metrics, logs, and traces. Metrics are
+cheap, aggregatable time series — request rate, error rate, and latency
+percentiles are the workhorses. Logs are high-cardinality event records, useful
+for the specific and the rare. Traces stitch a single request across services so
+you can see where latency accrues. Each answers a different question; none
+replaces the others.
+
+METRICS WITH PROMETHEUS
+
+Prometheus scrapes an HTTP endpoint on each pod and stores samples locally.
+Expose the four golden signals — latency, traffic, errors, and saturation — and
+let Prometheus handle aggregation. For retention beyond a few weeks, ship
+samples to a long-term store such as Thanos or Cortex. Avoid unbounded label
+cardinality; a label per user identifier will eventually exhaust memory.
+
+DASHBOARDS AND ALERTING
+
+Grafana renders Prometheus data into dashboards, but a dashboard nobody watches
+at three in the morning is decoration. Alerting rules should fire on
+user-visible symptoms — elevated error rate or latency — rather than on causes
+like high CPU, which may be perfectly normal. Every alert should point to a
+runbook.
+
+DISTRIBUTED TRACING
+
+OpenTelemetry has become the vendor-neutral standard for instrumentation.
+Instrument services to emit spans, propagate trace context across network
+boundaries, and export to a collector that fans out to a backend such as Jaeger
+or Tempo. Sampling keeps the volume manageable: head-based sampling is simple,
+tail-based sampling preserves the interesting traces at higher cost.
+
+KUBERNETES-SPECIFIC CONCERNS
+
+Pods are ephemeral, so tie telemetry to stable identifiers — the deployment and
+namespace — not the pod name. Scrape kube-state-metrics for cluster-level
+object state and the kubelet's cAdvisor endpoint for container resource usage.
+Watch for noisy-neighbor saturation on shared nodes, and remember that a
+liveness probe that is too aggressive will restart a slow-but-healthy pod and
+turn a latency blip into an outage.

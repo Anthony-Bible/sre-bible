@@ -37,6 +37,17 @@ When answering:
 - Keep answers punchy, spicy, and thoroughly entertaining.
 - Never use severe NSFW profanity (keep it PG-13, e.g., use "sh*t", "what the French toast", "mother-packer").`
 
+// DefaultPersonas returns the persona-mode prompt map the agent is wired with:
+// the standard professional voice and the secret Deadpool voice. Both the
+// server and the eval harness build their llm.Client from this single source so
+// they always advertise the same persona set — adding a persona is one edit here.
+func DefaultPersonas() map[PersonaMode]string {
+	return map[PersonaMode]string{
+		ModeStandard: StandardPersona,
+		ModeDeadpool: DeadpoolPersona,
+	}
+}
+
 // BuildContextBlock formats retrieved chunks as an XML-tagged block.
 func BuildContextBlock(chunks []RetrievedChunk) string {
 	var sb strings.Builder

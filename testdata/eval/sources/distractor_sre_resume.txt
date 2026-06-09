@@ -1,0 +1,40 @@
+# Maria Chen — Senior Site Reliability Engineer
+
+Reliability-focused infrastructure engineer with a decade of experience running
+large-scale services on public cloud. Comfortable owning everything from kernel
+tuning to incident command. Contact details available on request.
+
+## Experience
+
+### Brightwave Systems — Senior Site Reliability Engineer (Mar 2018 – Present)
+
+- Primary platform is Amazon Web Services: EKS, EC2 Auto Scaling, RDS, and S3.
+- Designed and operated an Istio service mesh across forty microservices,
+  using mTLS everywhere and request-level traffic shifting for canary releases.
+- Cut the on-call page volume by sixty percent over two quarters by auditing
+  alerts against the runbook-or-delete rule and moving to symptom-based alerting.
+- Rebuilt the team's on-call rotation into a follow-the-sun model spanning three
+  regions, eliminating overnight pages for the North America team.
+- Led blameless post-incident reviews and drove action items to completion.
+
+### Northwind Logistics — Site Reliability Engineer (Jul 2014 – Mar 2018)
+
+- Ran a fleet of self-managed Kubernetes clusters before managed control planes
+  were common, including etcd backup and disaster-recovery drills.
+- Built a metrics platform on Prometheus and Thanos for long-term storage.
+
+## Open Source
+
+- Core contributor to Prometheus, focused on the remote-write path.
+- Contributor to Thanos, primarily the compactor and store gateway.
+- Contributor to the OpenTelemetry Collector receivers.
+
+## Skills
+
+- Languages: Java and Rust in production, plus shell scripting.
+- Observability: Prometheus, Thanos, Grafana, OpenTelemetry.
+- Platforms: AWS, self-managed Kubernetes, Istio.
+
+## Education
+
+B.S. in Computer Science, Northwestern University.

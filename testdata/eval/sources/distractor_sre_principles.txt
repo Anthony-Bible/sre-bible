@@ -1,0 +1,44 @@
+Principles of Reliability Engineering
+
+This essay sketches a general philosophy of site reliability engineering. It is
+a vendor-neutral, person-neutral reference and does not describe any specific
+individual's career or opinions.
+
+ERROR BUDGETS OVER PERFECTION
+
+Perfect reliability is the wrong target. Past a point, each additional nine of
+availability costs more than it returns, and it slows the feature work that
+justifies the service existing at all. A service-level objective paired with an
+error budget makes the trade-off explicit: as long as the budget is intact, the
+team ships; when it is spent, reliability work takes priority until the budget
+recovers. The objective is a contract between the people who run the service and
+the people who depend on it, not an aspiration nobody enforces.
+
+TOIL IS A TAX, NOT A JOB
+
+Manual, repetitive, automatable work scales linearly with the system while the
+team does not. Treat toil as a tax on engineering capacity and budget time to
+pay it down. The goal is not zero toil — some manual work is cheaper than the
+automation that would replace it — but toil should be measured, capped, and
+trending down rather than quietly consuming a rotation.
+
+BLAMELESS CULTURE IS A PREREQUISITE
+
+People who fear punishment hide the information needed to fix systems. A
+blameless post-incident review assumes everyone acted reasonably given what they
+knew at the time, and asks what about the system made the failure likely. The
+output is durable systemic change, not a list of people to be more careful.
+
+STABILIZE BEFORE YOU OPTIMIZE
+
+A system that is on fire cannot be improved, only survived. Restore service
+first, understand later. Premature optimization of an unstable system wastes
+effort on a moving target and often makes the instability harder to diagnose.
+
+OBSERVABILITY IS NON-NEGOTIABLE
+
+You cannot operate what you cannot see. Metrics, logs, and traces are the three
+pillars, but the real test is whether an on-call engineer can answer "what
+changed and what is the blast radius" in minutes. Instrument for the questions
+you will ask at three in the morning, not the dashboards that look impressive in
+a review.

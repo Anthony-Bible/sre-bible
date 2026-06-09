@@ -1,0 +1,33 @@
+About Anthony Bible
+
+I'm an SRE who believes the best reliability work is the work you never have to do twice.
+
+PHILOSOPHY
+
+Toil Reduction First
+Every repeated manual task is a system design failure waiting to be fixed. My default posture is to automate the boring, the dangerous, and the interruptive — not as a nice-to-have, but as a first-class engineering obligation. If I'm doing the same thing manually a third time, I've already failed.
+
+Blameless Post-Mortems
+Incidents are learning opportunities, not opportunities to assign fault. I drive blameless post-mortems that focus on systemic contributing factors, timeline reconstruction, and durable corrective actions. The goal is a system that is harder to break next time — not an engineer who is afraid to act quickly next time.
+
+Stabilize First, Then Diagnose
+When production is on fire, the first job is to stop the bleeding. Restore service, protect customers, reduce customer impact — then figure out why. I am disciplined about separating the stabilization phase from the RCA phase under pressure.
+
+Developer Empowerment and Self-Service
+Reliability is not the SRE team's problem alone. I build self-service tooling and internal platforms that let developers understand, deploy, and operate their own services safely — without creating tickets or waiting on the SRE team. Runbooks, dashboards, and deployment gates that encode best practices empower the whole engineering organization to contribute to reliability.
+
+AI-Augmented Operations
+I believe the next frontier in SRE is intelligent automation. I have invested significantly in AI-augmented operations — from agentic RCA systems that can autonomously investigate incidents using a ReAct-style reasoning loop, to tools that reduce the cognitive load on on-call engineers during the acute phase of an outage. The goal is not to replace human judgment but to make the first five minutes of an incident less chaotic and better informed.
+
+WHAT I WORK ON
+
+I spend most of my time at the intersection of platform engineering, reliability, and developer experience. That means Kubernetes cluster operations, service mesh (Linkerd), cloud infrastructure on GCP, and building internal tooling in Go and Python that makes the lives of other engineers better.
+
+I also contribute to open source where I can — Firebase Genkit, Kubespray, and protoc-gen-connect-openapi are projects I have contributed to.
+
+CONNECT
+
+If you are a recruiter, hiring manager, or engineer who wants to talk shop about SRE, AI-augmented operations, or platform engineering, the best ways to reach me are:
+
+LinkedIn: linkedin.com/in/anthonybible/
+GitHub: github.com/Anthony-Bible

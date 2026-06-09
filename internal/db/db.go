@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	pgxvector "github.com/pgvector/pgvector-go/pgx"
 )
@@ -22,6 +23,19 @@ func NewPool(ctx context.Context, databaseURL string, log *slog.Logger) (*pgxpoo
 	cfg.MaxConns = 5
 	cfg.MaxConnIdleTime = 5 * time.Minute
 	cfg.MaxConnLifetime = 30 * time.Minute
+
+	// Bootstrap the pgvector extension before wiring RegisterTypes below.
+	// RegisterTypes looks up the `vector` type OID on every new connection and
+	// errors ("vector type not found") if the extension was never created. But
+	// CREATE EXTENSION lives in a migration that can't run until the pool can
+	// connect — a chicken-and-egg on a fresh database. Create it up front on a
+	// throwaway connection (which does not register vector types) so the typed
+	// pool below can connect. IF NOT EXISTS makes this a no-op once bootstrapped,
+	// and the privilege it needs is the same one the migration already uses.
+	if err := ensureVectorExtension(ctx, cfg.ConnConfig.Copy()); err != nil {
+		return nil, err
+	}
+
 	cfg.AfterConnect = pgxvector.RegisterTypes
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
@@ -36,6 +50,22 @@ func NewPool(ctx context.Context, databaseURL string, log *slog.Logger) (*pgxpoo
 
 	log.InfoContext(ctx, "database pool ready", slog.String("url", redactDSN(databaseURL)))
 	return pool, nil
+}
+
+// ensureVectorExtension creates the pgvector extension on a single throwaway
+// connection that does not register vector types, so a fresh database can be
+// bootstrapped before the typed pool (which requires the type to exist) opens.
+func ensureVectorExtension(ctx context.Context, connCfg *pgx.ConnConfig) error {
+	conn, err := pgx.ConnectConfig(ctx, connCfg)
+	if err != nil {
+		return fmt.Errorf("bootstrap connection: %w", err)
+	}
+	defer conn.Close(ctx)
+
+	if _, err := conn.Exec(ctx, "CREATE EXTENSION IF NOT EXISTS vector"); err != nil {
+		return fmt.Errorf("create vector extension: %w", err)
+	}
+	return nil
 }
 
 // redactDSN strips the password from a postgres DSN before it is logged.

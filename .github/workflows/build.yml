@@ -10,6 +10,97 @@ on:
   workflow_dispatch:
 
 jobs:
+  test-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: go vet
+        run: go vet ./...
+      - name: Unit tests
+        run: go test ./internal/ingest/... ./internal/eval/... ./internal/rag/... ./internal/email/... ./internal/gemini/... ./internal/server/... ./internal/turnstile/... -v -count=1
+
+  eval:
+    runs-on: ubuntu-latest
+    # Manual approval gate. This job attaches to the `eval-gate` Environment,
+    # which has a required reviewer configured in repo settings. The job enters
+    # a "waiting" state on every triggering PR/push and only runs once the
+    # reviewer approves it in the Actions UI ("Review deployments"). That keeps
+    # the LLM-judge gate — which spends rate-limited API keys — on-demand rather
+    # than auto-running on every push to a PR branch. Unapproved runs simply
+    # expire; nothing else depends on this job.
+    environment: eval-gate
+    # Same-repo PR branches (you / write-access collaborators) and main only.
+    # Fork PRs are excluded: GitHub already withholds secrets from them, so the
+    # gate would skip anyway — this just avoids running an untrusted fork's code
+    # in the DB-spinning job at all. head.repo.full_name == the repo is the
+    # canonical "not a fork" test.
+    if: >
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+      || github.ref == 'refs/heads/main'
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: sre
+          POSTGRES_PASSWORD: sre
+          POSTGRES_DB: sre_bible
+        options: --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # The eval gate needs API keys to embed fixtures and run the LLM judge.
+      # When the repo secrets are absent (e.g. forks, or before they are set),
+      # skip the keyed steps so the job stays green instead of hard-failing —
+      # and emit a warning so the skipped gate is visible. Migrations still run
+      # unconditionally below, giving every PR a fresh-DB migration smoke test.
+      - name: Detect eval secrets
+        id: eval_secrets
+        env:
+          GEMINI_API_KEY: ${{ secrets.EVAL_GEMINI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.EVAL_ANTHROPIC_API_KEY }}
+        run: |
+          if [ -n "$GEMINI_API_KEY" ] && [ -n "$ANTHROPIC_API_KEY" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Eval gate skipped::EVAL_GEMINI_API_KEY and/or EVAL_ANTHROPIC_API_KEY are not set; the eval quality gate did not run. Set both repository secrets to activate it."
+          fi
+      - name: Run migrations
+        env:
+          DATABASE_URL: postgres://sre:sre@localhost:5432/sre_bible?sslmode=disable
+        run: go run ./cmd/ingest migrate
+      - name: Ingest eval fixtures
+        if: steps.eval_secrets.outputs.enabled == 'true'
+        env:
+          DATABASE_URL: postgres://sre:sre@localhost:5432/sre_bible?sslmode=disable
+          GEMINI_API_KEY: ${{ secrets.EVAL_GEMINI_API_KEY }}
+        # Ingest every fixture in the sources directory — the real fixtures
+        # (resume, about) plus the distractor documents that give retrieval_check
+        # real discriminating power. Globbing means dropping a new .txt into the
+        # directory is enough; no workflow edit required.
+        run: |
+          for f in testdata/eval/sources/*.txt; do
+            echo "Ingesting $f"
+            go run ./cmd/ingest "$f"
+          done
+      - name: Run eval harness
+        if: steps.eval_secrets.outputs.enabled == 'true'
+        env:
+          EVAL_DATABASE_URL: postgres://sre:sre@localhost:5432/sre_bible?sslmode=disable
+          EVAL_GEMINI_API_KEY: ${{ secrets.EVAL_GEMINI_API_KEY }}
+          EVAL_ANTHROPIC_API_KEY: ${{ secrets.EVAL_ANTHROPIC_API_KEY }}
+        run: go run ./cmd/eval
+
   determine_version:
     runs-on: ubuntu-latest
     outputs:
