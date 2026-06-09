@@ -2,14 +2,19 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 
 	"github.com/Anthony-Bible/sre-bible/internal/db"
 	"github.com/Anthony-Bible/sre-bible/internal/gemini"
 	"github.com/Anthony-Bible/sre-bible/internal/ingest"
+	"github.com/spf13/pflag"
 )
+
+const usage = "usage: ingest <path-or-url> | ingest migrate | ingest rechunk [--dry-run]"
 
 func main() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
@@ -21,8 +26,9 @@ func main() {
 }
 
 func run(log *slog.Logger) error {
-	if len(os.Args) < 2 {
-		return fmt.Errorf("usage: ingest <path-or-url> | ingest migrate | ingest rechunk [--dry-run]")
+	args := os.Args[1:]
+	if len(args) == 0 {
+		return errors.New(usage)
 	}
 
 	dbURL := os.Getenv("DATABASE_URL")
@@ -42,31 +48,41 @@ func run(log *slog.Logger) error {
 		return fmt.Errorf("migrate: %w", err)
 	}
 
-	if os.Args[1] == "migrate" {
-		return nil
-	}
-
 	store := db.NewSourceStore(pool, log)
 
-	if os.Args[1] == "rechunk" {
-		// Reject any unrecognized extra arg rather than silently treating it as a
-		// live run — a typo like `rechunk --dryrun` must not destructively re-embed.
-		dryRun := false
-		if len(os.Args) > 2 {
-			if os.Args[2] != "--dry-run" {
-				return fmt.Errorf("usage: ingest rechunk [--dry-run]")
-			}
-			dryRun = true
+	switch cmd := args[0]; cmd {
+	case "migrate":
+		// Migrations already ran above; nothing further to do.
+		return nil
+	case "rechunk":
+		return runRechunk(ctx, log, store, args[1:])
+	default:
+		// Any other first argument is treated as a path or URL to ingest.
+		pipeline, err := buildPipeline(ctx, store, log)
+		if err != nil {
+			return err
 		}
-		return rechunkAll(ctx, log, store, dryRun)
+		return pipeline.Run(ctx, cmd)
 	}
+}
 
-	pipeline, err := buildPipeline(ctx, store, log)
-	if err != nil {
-		return err
+// runRechunk parses the rechunk subcommand's flags and dispatches to rechunkAll.
+// pflag's strict parsing rejects unknown flags and stray positional args, so a
+// typo like `rechunk --dryrun` errors out rather than silently performing a
+// destructive, re-embedding live run.
+func runRechunk(ctx context.Context, log *slog.Logger, store rechunkStore, args []string) error {
+	fs := pflag.NewFlagSet("rechunk", pflag.ContinueOnError)
+	// Surface parse failures through the returned error (logged by main) rather
+	// than pflag's own stderr usage dump.
+	fs.SetOutput(io.Discard)
+	dryRun := fs.Bool("dry-run", false, "report chunk counts without re-embedding or writing")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("ingest rechunk: %w", err)
 	}
-
-	return pipeline.Run(ctx, os.Args[1])
+	if fs.NArg() > 0 {
+		return fmt.Errorf("ingest rechunk: unexpected argument %q", fs.Arg(0))
+	}
+	return rechunkAll(ctx, log, store, *dryRun)
 }
 
 // buildPipeline reads GEMINI_API_KEY and wires the ingest pipeline (the Gemini
