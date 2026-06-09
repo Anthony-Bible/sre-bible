@@ -24,6 +24,13 @@ func chunkWithConfig(text string, target, hardCap, overlap int) []string {
 
 	var chunks []string
 	start := 0
+	// prevSplit is the end (exclusive) of the previously emitted chunk. Each new
+	// split point must land strictly after it: the overlap window backs `start`
+	// up before prevSplit, so without this floor the same early boundary (e.g. a
+	// section header's lone \n\n preceding a long single-newline list) gets
+	// re-selected every iteration, emitting a staircase of ever-shrinking
+	// degenerate tail chunks. Monotonic split points guarantee forward progress.
+	prevSplit := 0
 
 	for start < len(runes) {
 		// Remaining runes all fit in one chunk
@@ -35,7 +42,8 @@ func chunkWithConfig(text string, target, hardCap, overlap int) []string {
 			break
 		}
 
-		splitAt := findSplitPoint(runes, start, target, hardCap)
+		splitAt := findSplitPoint(runes, start, target, hardCap, prevSplit)
+		prevSplit = splitAt
 
 		chunk := string(runes[start:splitAt])
 		if isNonEmpty(chunk) {
@@ -62,7 +70,14 @@ func chunkWithConfig(text string, target, hardCap, overlap int) []string {
 // for the slice runes[start:]. Boundary quality ranks as \n\n > \n > space > hard cut.
 // Among equal-quality boundaries, the one at or after start+target is preferred so
 // chunks land near the target size rather than splitting as early as possible.
-func findSplitPoint(runes []rune, start, target, hardCap int) int {
+//
+// minSplit is a floor: the returned split point is always > minSplit. The caller
+// passes the previous chunk's split point so that an early boundary already
+// consumed cannot be re-selected when the overlap window slides back over it —
+// the cause of the degenerate-tail staircase. The hard-cut fallback (end) always
+// satisfies the floor because end = start+hardCap exceeds any prior split that the
+// overlap window could have backed `start` up behind.
+func findSplitPoint(runes []rune, start, target, hardCap, minSplit int) int {
 	end := start + hardCap
 	if end > len(runes) {
 		end = len(runes)
@@ -71,25 +86,34 @@ func findSplitPoint(runes []rune, start, target, hardCap int) int {
 	if preferred > end {
 		preferred = end
 	}
+	// pref floors the high-quality first pass at or after the target size.
+	// lo floors the widened fallback by two independent concerns: minSplit (the
+	// staircase guard — never re-select a boundary at or before the prior split)
+	// and minFragment (don't split off a leading chunk smaller than half a target,
+	// so a lone "## HEADING\n\n" before a long list is absorbed forward, not
+	// orphaned).
+	minFragment := target / 2
+	lo := max(start+minFragment, minSplit)
+	pref := max(preferred, minSplit)
 
 	// For each boundary type, try the preferred window first, then widen to the
-	// full [start, end) window. Quality ordering is preserved across the two windows.
-	if pos, ok := lastParaBreak(runes, preferred, end); ok {
+	// full [lo, end) window. Quality ordering is preserved across the two windows.
+	if pos, ok := lastParaBreak(runes, pref, end); ok {
 		return pos
 	}
-	if pos, ok := lastParaBreak(runes, start, end); ok {
+	if pos, ok := lastParaBreak(runes, lo, end); ok {
 		return pos
 	}
-	if pos, ok := lastNewline(runes, preferred, end); ok {
+	if pos, ok := lastNewline(runes, pref, end); ok {
 		return pos
 	}
-	if pos, ok := lastNewline(runes, start, end); ok {
+	if pos, ok := lastNewline(runes, lo, end); ok {
 		return pos
 	}
-	if pos, ok := lastSpace(runes, preferred, end); ok {
+	if pos, ok := lastSpace(runes, pref, end); ok {
 		return pos
 	}
-	if pos, ok := lastSpace(runes, start, end); ok {
+	if pos, ok := lastSpace(runes, lo, end); ok {
 		return pos
 	}
 

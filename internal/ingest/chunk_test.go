@@ -254,6 +254,70 @@ func TestChunk_ShortInputReturnsSingleChunk(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------
+// Contract 8: an early paragraph boundary followed by a long run with only
+// single-newline (list) or no breaks must not produce a "staircase" of
+// ever-shrinking degenerate tail chunks.
+//
+// Regression for the resume/README bug: the experience section was a markdown
+// list whose only \n\n was the section header. The chunker split early at that
+// header, then the overlap window kept re-selecting the same boundary, emitting
+// a chunk that shrank one word/char at a time ("Present*" -> "resent*" -> ...
+// -> "*"). Every successive split point must strictly advance.
+// -----------------------------------------------------------------------
+
+func TestChunk_NoStaircaseAfterEarlyParagraphBreak(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+	}{
+		{
+			// Short header paragraph, then a long single-\n markdown list with
+			// no further \n\n for well over the hard cap — mirrors the resume.
+			name: "header then long single-newline list",
+			input: "## EXPERIENCE\n\n" +
+				strings.TrimRight(strings.Repeat(
+					"* Built and shipped agentic systems that cut mean-time-to-resolution across services\n", 60), "\n"),
+		},
+		{
+			// Early paragraph break, then one giant paragraph (prose, spaces only)
+			// far exceeding the hard cap — the heading-then-prose variant.
+			name:  "short heading then giant paragraph",
+			input: "Overview\n\n" + makeText(5000),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			chunks := ChunkText(tc.input)
+			if len(chunks) == 0 {
+				t.Fatal("ChunkText returned nil/empty for non-empty input")
+			}
+
+			// No degenerate fragments. The algorithm guarantees every chunk
+			// (including the trailing remainder) carries at least one overlap
+			// window of content; word-boundary snapping costs a few chars, so we
+			// assert a floor comfortably below a real chunk yet far above the
+			// 3–32 char staircase fragments the bug produced.
+			const minLen = 100
+			for i, c := range chunks {
+				if l := len([]rune(c)); l < minLen {
+					t.Errorf("chunk[%d] is a degenerate %d-char fragment (%q); staircase not eliminated", i, l, c)
+				}
+			}
+
+			// Chunk count must be proportional to input size, not exploded by a
+			// staircase. With step ≈ target-overlap (~800), a generous bound is
+			// len/400 + 3.
+			maxChunks := len([]rune(tc.input))/400 + 3
+			if len(chunks) > maxChunks {
+				t.Errorf("got %d chunks for %d-rune input; want ≤ %d (staircase suspected)",
+					len(chunks), len([]rune(tc.input)), maxChunks)
+			}
+		})
+	}
+}
+
+// -----------------------------------------------------------------------
 // Contract 7: splitting prefers paragraph boundary (\n\n) over word boundary
 // -----------------------------------------------------------------------
 

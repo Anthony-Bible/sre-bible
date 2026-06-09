@@ -11,6 +11,13 @@ import (
 	"codeberg.org/readeck/go-readability"
 )
 
+// Source types produced by DeriveSourceName and consumed by Pipeline.extractText.
+const (
+	sourceTypeURL  = "url"
+	sourceTypePDF  = "pdf"
+	sourceTypeText = "text"
+)
+
 // DeriveSourceName returns the canonical citation name and source type for a location.
 // URLs return (full URL, "url"); .txt files return (basename, "text"); other file paths return (basename, "pdf").
 func DeriveSourceName(location string) (string, string, error) {
@@ -18,13 +25,13 @@ func DeriveSourceName(location string) (string, string, error) {
 		if _, err := url.Parse(location); err != nil {
 			return "", "", fmt.Errorf("invalid URL: %w", err)
 		}
-		return location, "url", nil
+		return location, sourceTypeURL, nil
 	}
 	base := filepath.Base(location)
 	if strings.EqualFold(filepath.Ext(base), ".txt") {
-		return base, "text", nil
+		return base, sourceTypeText, nil
 	}
-	return base, "pdf", nil
+	return base, sourceTypePDF, nil
 }
 
 // ExtractURL fetches a web page and returns its main text content.

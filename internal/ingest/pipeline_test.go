@@ -170,6 +170,76 @@ func TestPipeline_ScreenerErrorAbortsBeforeStore(t *testing.T) {
 	}
 }
 
+// TestPipeline_RechunkPreservesMetadataAndReplacesChunks asserts the Rechunk
+// contract: it re-segments src.FullText with the current chunker, embeds each
+// segment, and calls ReplaceSource with the source metadata preserved verbatim
+// (Name, Type, Location, Description) and one Chunk per segment with sequential
+// Idx. Extraction, PII screening, and description must NOT run — the fakePDF/URL
+// extractors error if touched, and we pass the description through unchanged.
+func TestPipeline_RechunkPreservesMetadataAndReplacesChunks(t *testing.T) {
+	t.Parallel()
+
+	// FullText long enough to force multiple chunks (> hard cap).
+	fullText := makeParagraphs(6, 500)
+	src := Source{
+		Name:        "resume.pdf",
+		Type:        "pdf",
+		Location:    "/data/resume.pdf",
+		FullText:    fullText,
+		Description: "An SRE résumé.",
+	}
+
+	embedder := &fakeEmbedder{}
+	store := &fakeStore{}
+	p := NewPipeline(fakePDFExtractor{}, embedder, &fakeDescriber{}, &fakeScreener{}, fakeURLExtractor{}, store, slog.Default())
+
+	n, err := p.Rechunk(context.Background(), src)
+	if err != nil {
+		t.Fatalf("Rechunk() error: %v", err)
+	}
+
+	wantSegments := ChunkText(fullText)
+	if n != len(wantSegments) {
+		t.Errorf("Rechunk returned %d; want %d chunks", n, len(wantSegments))
+	}
+	if !store.called {
+		t.Fatal("ReplaceSource was not called")
+	}
+	if store.receivedSrc != src {
+		t.Errorf("source metadata mutated\ngot:  %+v\nwant: %+v", store.receivedSrc, src)
+	}
+	if len(store.receivedChunks) != len(wantSegments) {
+		t.Fatalf("stored %d chunks; want %d", len(store.receivedChunks), len(wantSegments))
+	}
+	for i, c := range store.receivedChunks {
+		if c.Idx != i {
+			t.Errorf("chunk[%d].Idx = %d; want %d", i, c.Idx, i)
+		}
+		if c.Content != wantSegments[i] {
+			t.Errorf("chunk[%d] content does not match ChunkText output", i)
+		}
+		if len(c.Embedding) == 0 {
+			t.Errorf("chunk[%d] has no embedding", i)
+		}
+	}
+}
+
+// TestPipeline_RechunkEmptyFullTextErrors asserts Rechunk refuses a source with
+// no stored full text (it has nothing to re-segment) and never writes.
+func TestPipeline_RechunkEmptyFullTextErrors(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeStore{}
+	p := NewPipeline(fakePDFExtractor{}, &fakeEmbedder{}, &fakeDescriber{}, &fakeScreener{}, fakeURLExtractor{}, store, slog.Default())
+
+	if _, err := p.Rechunk(context.Background(), Source{Name: "legacy.pdf"}); err == nil {
+		t.Fatal("Rechunk() returned nil; want error for source with empty FullText")
+	}
+	if store.called {
+		t.Error("ReplaceSource was called for a source with no full text")
+	}
+}
+
 // TestPipeline_SourceNameDerivedFromTxtFile asserts that the pipeline sets the
 // source name to the basename of the .txt file (the contract of DeriveSourceName
 // for text-type sources).
