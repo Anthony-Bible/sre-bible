@@ -679,3 +679,35 @@ func TestGetInterviewState_MissingSession(t *testing.T) {
 		t.Errorf("GetInterviewState for missing session: got %+v, want nil", got)
 	}
 }
+
+// TestSetInterviewState_MissingSession verifies that SetInterviewState errors
+// when the target session row does not exist, rather than silently succeeding
+// on a zero-row UPDATE.
+func TestSetInterviewState_MissingSession(t *testing.T) {
+	pool, cleanup := testSessionDB(t)
+	defer cleanup()
+
+	store := db.NewSessionStore(pool, slog.Default())
+	ctx := context.Background()
+
+	state := &rag.InterviewState{TotalQuestions: 1, Questions: []string{"q"}}
+	err := store.SetInterviewState(ctx, sessionID("100000000006"), state)
+	if err == nil {
+		t.Fatal("SetInterviewState for missing session: got nil error, want not-found error")
+	}
+}
+
+// TestClearInterviewState_MissingSession verifies that ClearInterviewState
+// errors when the target session row does not exist.
+func TestClearInterviewState_MissingSession(t *testing.T) {
+	pool, cleanup := testSessionDB(t)
+	defer cleanup()
+
+	store := db.NewSessionStore(pool, slog.Default())
+	ctx := context.Background()
+
+	err := store.ClearInterviewState(ctx, sessionID("100000000007"))
+	if err == nil {
+		t.Fatal("ClearInterviewState for missing session: got nil error, want not-found error")
+	}
+}

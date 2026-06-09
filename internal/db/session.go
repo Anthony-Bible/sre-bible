@@ -175,24 +175,30 @@ func (s *SessionStore) SetInterviewState(ctx context.Context, sessionID string, 
 	if err != nil {
 		return fmt.Errorf("marshal interview state: %w", err)
 	}
-	_, err = s.pool.Exec(ctx,
+	tag, err := s.pool.Exec(ctx,
 		`UPDATE sessions SET interview_state = $1, interview_active = true WHERE id = $2`,
 		raw, sessionID,
 	)
 	if err != nil {
 		return fmt.Errorf("set interview state: %w", err)
 	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("set interview state: session %s not found", sessionID)
+	}
 	return nil
 }
 
 // ClearInterviewState clears the persisted interview state and marks it inactive.
 func (s *SessionStore) ClearInterviewState(ctx context.Context, sessionID string) error {
-	_, err := s.pool.Exec(ctx,
+	tag, err := s.pool.Exec(ctx,
 		`UPDATE sessions SET interview_state = NULL, interview_active = false WHERE id = $1`,
 		sessionID,
 	)
 	if err != nil {
 		return fmt.Errorf("clear interview state: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("clear interview state: session %s not found", sessionID)
 	}
 	return nil
 }
