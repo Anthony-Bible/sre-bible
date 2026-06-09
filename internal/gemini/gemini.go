@@ -37,3 +37,22 @@ func (c *Client) generateContent(ctx context.Context, model string, parts []*gen
 	}
 	return resp.Text(), nil
 }
+
+// GenerateText runs a single-turn, deterministic (temperature=0) generation with
+// the given model and prompt, returning the response text. It is intended for
+// evaluation and classification use where reproducibility matters. maxOutputTokens
+// bounds the response; pass a value comfortably larger than the expected output so
+// a "thinking" model has headroom to reason and still emit its final answer.
+// Callers wrap errors with additional context.
+func (c *Client) GenerateText(ctx context.Context, model, prompt string, maxOutputTokens int32) (string, error) {
+	resp, err := c.inner.Models.GenerateContent(ctx, model,
+		[]*genai.Content{genai.NewContentFromParts([]*genai.Part{genai.NewPartFromText(prompt)}, genai.RoleUser)},
+		&genai.GenerateContentConfig{
+			Temperature:     genai.Ptr[float32](0),
+			MaxOutputTokens: maxOutputTokens,
+		})
+	if err != nil {
+		return "", err
+	}
+	return resp.Text(), nil
+}

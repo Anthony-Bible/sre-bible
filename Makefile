@@ -1,4 +1,4 @@
-.PHONY: db-up db-down migrate test ingest query deps lint serve build-server
+.PHONY: db-up db-down migrate test ingest query deps lint serve build-server eval
 
 DATABASE_URL ?= postgres://sre:sre@localhost:5432/sre_bible?sslmode=disable
 TEST_DATABASE_URL ?= $(DATABASE_URL)
@@ -25,7 +25,7 @@ test:
 	TEST_DATABASE_URL=$(TEST_DATABASE_URL) go test ./... -v -count=1
 
 test-unit:
-	go test ./internal/ingest/... -v -count=1
+	go test ./internal/ingest/... ./internal/eval/... ./internal/rag/... ./internal/email/... ./internal/gemini/... ./internal/server/... ./internal/turnstile/... -v -count=1
 
 test-integration: db-up
 	TEST_DATABASE_URL=$(TEST_DATABASE_URL) go test ./internal/db/... -v -count=1
@@ -55,3 +55,6 @@ serve: db-up
 
 build-server:
 	go build -o bin/server ./cmd/server
+
+eval:
+	EVAL_DATABASE_URL=$(DATABASE_URL) EVAL_GEMINI_API_KEY=$(GEMINI_API_KEY) EVAL_ANTHROPIC_API_KEY=$(ANTHROPIC_API_KEY) go run ./cmd/eval

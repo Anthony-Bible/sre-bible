@@ -25,7 +25,6 @@ func TestIsRateLimited(t *testing.T) {
 		{"wrapped 429", fmt.Errorf("embed query: %w", genai.APIError{Code: 429}), true},
 	}
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			if got := isRateLimited(tc.err); got != tc.want {

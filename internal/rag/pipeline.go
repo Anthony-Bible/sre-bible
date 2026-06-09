@@ -18,6 +18,16 @@ type Pipeline struct {
 	emailerFor EmailerFactory
 	k          int
 	log        *slog.Logger
+	onToolCall func(string)
+}
+
+// PipelineOption is a functional option for configuring a Pipeline.
+type PipelineOption func(*Pipeline)
+
+// WithOnToolCall returns a PipelineOption that registers a hook called with the
+// tool name each time the generator invokes a tool during the agentic loop.
+func WithOnToolCall(fn func(toolName string)) PipelineOption {
+	return func(p *Pipeline) { p.onToolCall = fn }
 }
 
 // NewPipeline creates a Pipeline. Pass k=0 to use defaultK (8).
@@ -25,14 +35,14 @@ type Pipeline struct {
 // the list_documents / fetch_full_document tools to escalate beyond chunks.
 // matcher may be nil; when non-nil, the match_job_description tool is advertised.
 // emailerFor may be nil; when non-nil, the send_contact_email tool is advertised.
-func NewPipeline(embedder QueryEmbedder, searcher ChunkSearcher, generator Generator, lister DocumentLister, fetcher FullTextFetcher, matcher JobMatcher, emailerFor EmailerFactory, k int, log *slog.Logger) *Pipeline {
+func NewPipeline(embedder QueryEmbedder, searcher ChunkSearcher, generator Generator, lister DocumentLister, fetcher FullTextFetcher, matcher JobMatcher, emailerFor EmailerFactory, k int, log *slog.Logger, opts ...PipelineOption) *Pipeline {
 	if k <= 0 {
 		k = defaultK
 	}
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Pipeline{
+	p := &Pipeline{
 		embedder:   embedder,
 		searcher:   searcher,
 		generator:  generator,
@@ -43,6 +53,10 @@ func NewPipeline(embedder QueryEmbedder, searcher ChunkSearcher, generator Gener
 		k:          k,
 		log:        log,
 	}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
 }
 
 // Answer embeds the question, retrieves relevant chunks, assembles the full
@@ -93,7 +107,20 @@ func (p *Pipeline) Answer(ctx context.Context, sessionID string, history []Messa
 	if p.emailerFor != nil {
 		tools.Emailer = p.emailerFor(sessionID)
 	}
-	toolFetched, err := p.generator.StreamAnswer(ctx, messages, tools, onToken, onTrace)
+	traceForGen := onTrace
+	if p.onToolCall != nil {
+		hook := p.onToolCall
+		traceForGen = func(step TraceStep) error {
+			if step.Kind == TraceKindToolCall && step.ToolCall != nil {
+				hook(step.ToolCall.Tool)
+			}
+			if onTrace != nil {
+				return onTrace(step)
+			}
+			return nil
+		}
+	}
+	toolFetched, err := p.generator.StreamAnswer(ctx, messages, tools, onToken, traceForGen)
 	if err != nil {
 		return nil, err
 	}

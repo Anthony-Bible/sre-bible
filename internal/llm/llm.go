@@ -87,22 +87,41 @@ type Client struct {
 	baseSystemPrompt string
 	personas         map[rag.PersonaMode]string
 	log              *slog.Logger
+	// temperature, when non-nil, pins the sampling temperature. Nil omits the
+	// field so the Anthropic API default applies (production's natural variation).
+	temperature *float64
+}
+
+// Option configures a Client at construction time.
+type Option func(*Client)
+
+// WithTemperature pins the sampling temperature for generation. Without it the
+// client omits the field entirely and the Anthropic API default applies. The
+// eval harness sets temperature=0 so its quality gate measures the agent's
+// behaviour rather than sampling noise; production leaves it unset to keep the
+// agent's natural conversational variation.
+func WithTemperature(t float64) Option {
+	return func(c *Client) { c.temperature = &t }
 }
 
 // NewClient creates an Anthropic Claude streaming client.
 // baseSystemPrompt and personas are used to construct the system prompt dynamically on each call.
-func NewClient(apiKey, model, baseSystemPrompt string, personas map[rag.PersonaMode]string, log *slog.Logger) *Client {
+func NewClient(apiKey, model, baseSystemPrompt string, personas map[rag.PersonaMode]string, log *slog.Logger, opts ...Option) *Client {
 	if log == nil {
 		log = slog.Default()
 	}
 	c := anthropic.NewClient(option.WithAPIKey(apiKey))
-	return &Client{
+	client := &Client{
 		inner:            &c,
 		model:            model,
 		baseSystemPrompt: baseSystemPrompt,
 		personas:         personas,
 		log:              log,
 	}
+	for _, opt := range opts {
+		opt(client)
+	}
+	return client
 }
 
 // StreamAnswer implements rag.Generator. Sends systemPrompt + messages to Claude,
@@ -130,35 +149,7 @@ func (c *Client) StreamAnswer(ctx context.Context, messages []rag.Message, tools
 	var fetchedNames []string
 
 	for round := 0; round <= maxToolRounds; round++ {
-		mode := rag.PersonaModeFromContext(ctx)
-		var personaText string
-		if c.personas != nil {
-			personaText = c.personas[mode]
-			if personaText == "" {
-				personaText = c.personas[rag.ModeStandard]
-			}
-		}
-
-		systemBlocks := []anthropic.TextBlockParam{
-			{Text: c.baseSystemPrompt},
-		}
-		if personaText != "" {
-			systemBlocks = append(systemBlocks, anthropic.TextBlockParam{Text: personaText})
-		}
-
-		reqParams := anthropic.MessageNewParams{
-			Model:     c.model,
-			MaxTokens: 2048,
-			System:    systemBlocks,
-			Messages:  params,
-		}
-		if len(toolParams) > 0 {
-			reqParams.Tools = toolParams
-			if round >= maxToolRounds {
-				none := anthropic.NewToolChoiceNoneParam()
-				reqParams.ToolChoice = anthropic.ToolChoiceUnionParam{OfNone: &none}
-			}
-		}
+		reqParams := c.buildRequestParams(ctx, params, toolParams, round)
 
 		acc, err := c.streamOnce(ctx, reqParams, onToken)
 		if err != nil {
@@ -186,6 +177,48 @@ func (c *Client) StreamAnswer(ctx context.Context, messages []rag.Message, tools
 	c.log.InfoContext(ctx, "stream complete (tool cap hit)", "model", c.model)
 	emitAnswerStep(onTrace, maxToolRounds, start)
 	return fetchedNames, nil
+}
+
+// buildRequestParams assembles the per-round Anthropic request: the system
+// blocks (base prompt plus the active persona for this context), the message
+// history, the tool set, and — on the final round — a forced no-tool choice so
+// the model produces a terminal answer rather than another tool call. When the
+// client has a pinned temperature (eval), it is set; otherwise the field is
+// omitted so the API default applies.
+func (c *Client) buildRequestParams(ctx context.Context, params []anthropic.MessageParam, toolParams []anthropic.ToolUnionParam, round int) anthropic.MessageNewParams {
+	mode := rag.PersonaModeFromContext(ctx)
+	var personaText string
+	if c.personas != nil {
+		personaText = c.personas[mode]
+		if personaText == "" {
+			personaText = c.personas[rag.ModeStandard]
+		}
+	}
+
+	systemBlocks := []anthropic.TextBlockParam{
+		{Text: c.baseSystemPrompt},
+	}
+	if personaText != "" {
+		systemBlocks = append(systemBlocks, anthropic.TextBlockParam{Text: personaText})
+	}
+
+	reqParams := anthropic.MessageNewParams{
+		Model:     c.model,
+		MaxTokens: 2048,
+		System:    systemBlocks,
+		Messages:  params,
+	}
+	if c.temperature != nil {
+		reqParams.Temperature = anthropic.Float(*c.temperature)
+	}
+	if len(toolParams) > 0 {
+		reqParams.Tools = toolParams
+		if round >= maxToolRounds {
+			none := anthropic.NewToolChoiceNoneParam()
+			reqParams.ToolChoice = anthropic.ToolChoiceUnionParam{OfNone: &none}
+		}
+	}
+	return reqParams
 }
 
 // emitTrace delivers one TraceStep to onTrace on a best-effort basis. A nil onTrace is a

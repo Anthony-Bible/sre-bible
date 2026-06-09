@@ -1,0 +1,23 @@
+On-Call Excellence: A Field Guide for Reliability Teams
+
+This guide collects industry best practices for running a humane, effective on-call rotation. It is a general reference and is not tied to any single company or engineer.
+
+ROTATION DESIGN
+
+A sustainable rotation balances coverage against burnout. Most mature teams run a primary/secondary model with weekly handoffs and a hard cap on consecutive on-call weeks. Follow-the-sun rotations across time zones eliminate overnight paging entirely, but require enough headcount in each region to be viable. Compensation — either time off in lieu or an on-call stipend — should be explicit policy, not an afterthought.
+
+REDUCING PAGE VOLUME
+
+The single biggest lever for on-call health is cutting the number of pages that do not require human action. Audit every alert quarterly and delete or downgrade any that have not led to a corrective action in the last ninety days. Alert on symptoms that users feel — latency, error rate, saturation — rather than on causes. Tie every page to a runbook; if a page has no runbook, it is not ready to be a page.
+
+HANDOFFS AND ESCALATION
+
+A good handoff is a five-minute synchronous conversation plus a written summary of open incidents, suppressed alerts, and known risks for the upcoming window. Escalation policies should be tested with game days, not discovered during a real outage. Every responder must know how to reach the next tier within two minutes.
+
+POST-INCIDENT REVIEW
+
+Reviews should be blameless and focus on contributing factors rather than individuals. Capture the timeline, the detection gap, the mitigation steps, and the durable follow-up work. Track action items to completion; an unactioned post-mortem is theater.
+
+METRICS THAT MATTER
+
+Track mean time to acknowledge, mean time to mitigate, pages per shift, and the percentage of pages that were actionable. A rising actionable-page percentage with falling total page volume is the signature of a healthy program.

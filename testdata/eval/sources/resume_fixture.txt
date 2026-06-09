@@ -1,0 +1,71 @@
+# Anthony Bible
+
+Senior Site Reliability Engineer · Platform & Agentic Tooling
+[redacted] · [redacted] · linkedin.com/in/anthonybible · github.com/anthony-bible
+
+---
+
+## SUMMARY
+
+Site Reliability Engineer with 7+ years across IT, platform, and SRE roles, the last 5+ operating Kubernetes on Google Cloud. Writes production Go and Python and has merged code into Firebase Genkit, Kubespray, and protoc-gen-connect-openapi. At TCN, built the agentic RCA system engineering teams adopted org-wide within months of launch, built JIT access provisioning for senior engineers' production access, and expanded the observability platform to cover SLOs across 300+ services on a multi-tenant Kubernetes platform serving thousands of customers. Primary on-call for Tier-0 services handling billions of calls annually.
+
+---
+
+## TECHNICAL SKILLS
+
+* **Languages:** Go, Python (production), Bash, gRPC, Protocol Buffers
+* **Agentic & AI Tooling:** LLM-based incident RCA systems, agentic triage pipelines, GPU node autoscaling on GKE, open-source model serving (guardrails, code-RAG), Firebase Genkit
+* **Kubernetes & Containers:** Kubernetes (GKE), Kubernetes Operators, Docker, Helm, Kustomize, Linkerd service mesh, Envoy ingress
+* **Observability:** Prometheus, Grafana, OpenTelemetry, GCP Monitoring, custom exporters, SLOs/SLIs, distributed tracing, structured logging, ELK
+* **CI/CD & GitOps:** ArgoCD Rollouts, GitOps, GitHub Actions, GitLab CI
+* **Infrastructure as Code:** Ansible, Crossplane, custom Go-based IaC tool (JSON-defined desired state)
+* **Cloud:** Google Cloud Platform (primary), AWS
+* **Networking:** Production load balancing, DNS at scale, Linkerd mTLS, Envoy ingress, Linux networking
+* **Reliability:** Tier-0 incident command, blameless post-mortems, runbook automation, agentic RCA, capacity planning
+* **Security:** Kubernetes RBAC, JIT access provisioning, internal secrets rotation
+* **Data:** PostgreSQL, ClickHouse
+
+---
+
+## EXPERIENCE
+
+### TCN · *Site Reliability Engineer*
+*Aug 2020 – Present*
+
+* Built and shipped agentic RCA tooling adopted across engineering within months of launch; it pulls logs, metrics, and traces to surface root cause on P0/P1 incidents and cuts time-to-diagnosis.
+* Built and shipped a JIT access provisioning system every senior engineer uses to get production access; cut credential blast radius and removed toil from the security on-call rotation.
+* Expanded the observability platform on Prometheus, Grafana, OpenTelemetry, and GCP Monitoring; defined SLOs and SLIs across 300+ services with engineering leads and tuned alerting so on-call pages on real user-impacting regressions.
+* Set up autoscaling for NVIDIA GPU GKE nodes supporting production LLM and TTS workloads; deployed open-source models including a guardrails model for jailbreak detection and a code-RAG system used by internal developer tooling.
+* Operate 7 global GKE clusters with Linkerd service mesh and Envoy ingress, 300+ microservices handling tens of millions of real-time calls daily across a multi-tenant platform serving thousands of customers.
+* Run continuous deployment with ArgoCD Rollouts and GitOps across 300+ services using Helm and Kustomize with rolling updates, manual promotion gates between environments, and self-service developer rollback.
+* Write Kubernetes Operators and Go/Python automation that removes toil from cluster operations; help maintain a Go-based IaC tool that reads JSON-defined desired state.
+* Lead sev-0/1 incident command as primary on-call for Tier-0 services: coordinate cross-team mitigation, drive blameless post-mortems, maintain escalation runbooks, and convert findings into automation that prevents repeat incidents.
+* Manage production load balancing across 7 multi-region GKE clusters and operate Linkerd mTLS for service-to-service authentication across the mesh.
+* Operate PostgreSQL fleets at hundreds of TB serving millions of daily queries.
+* Mentor junior SREs and run training for developers on observability, incident response, and Go tooling.
+
+### Inetz Media Group · *Systems Administrator*
+*Feb 2019 – Aug 2020*
+
+* Maintained 15 high-availability clusters and 150+ servers at 99.9% uptime, supporting web properties with 500K+ unique monthly visitors.
+* Ran multiple production DNS servers and load balancers fronting customer web properties.
+* Automated deployment and scaling pipelines with Salt across primarily on-premise infrastructure; coordinated production releases with a 7-engineer team.
+
+### Rocky Mountain Data Control · *IT Specialist*
+*Jul 2017 – Feb 2019*
+
+* Modernized the infrastructure with ELK (Elasticsearch, Logstash, Kibana), virtualized and consolidated the server fleet, and automated manual processes that cut $20K from annual operating costs.
+* Drove PCI-DSS and HIPAA compliance from scratch and obtained USPS Sensitive Security Clearance.
+
+### Boys & Girls Clubs of Greater Salt Lake · *IT Specialist*
+*Aug 2014 – Jul 2016*
+
+* Managed computers, networking, and daily IT operations across 4 locations.
+
+---
+
+## OPEN SOURCE
+
+* **Kubespray (CNCF)** — Contributed Hetzner Cloud provider support to the Terraform provisioning modules and Ansible cluster bootstrap.
+* **protoc-gen-connect-openapi** — Merged Go PRs to this Connect RPC $\rightarrow$ OpenAPI generator: shortened operationIds and tags, path-variable expansion for google.api.http annotations, fixes for duplicate required properties and RFC 3339 timestamp examples.
+* **Firebase Genkit (Google)** — Merged code contributions to Google's open-source AI app framework.
