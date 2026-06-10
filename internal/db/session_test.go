@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"reflect"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -511,5 +512,202 @@ func TestMarkSessionVerified_RoundTrip(t *testing.T) {
 	}
 	if !verified {
 		t.Error("IsSessionVerified returned false after MarkSessionVerified, want true")
+	}
+}
+
+// --- Contract: Interview simulator state ---
+
+// TestIsInterviewActive_DefaultFalse verifies that a freshly created session
+// reports interview_active = false.
+func TestIsInterviewActive_DefaultFalse(t *testing.T) {
+	pool, cleanup := testSessionDB(t)
+	defer cleanup()
+
+	store := db.NewSessionStore(pool, slog.Default())
+	id := sessionID("100000000001")
+	ctx := context.Background()
+
+	if err := store.CreateSession(ctx, id); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	active, err := store.IsInterviewActive(ctx, id)
+	if err != nil {
+		t.Fatalf("IsInterviewActive: %v", err)
+	}
+	if active {
+		t.Error("IsInterviewActive returned true for a fresh session, want false")
+	}
+}
+
+// TestSetInterviewState_RoundTrip verifies that an InterviewState with every
+// field populated survives a Set → Get round-trip via the JSONB column.
+func TestSetInterviewState_RoundTrip(t *testing.T) {
+	pool, cleanup := testSessionDB(t)
+	defer cleanup()
+
+	store := db.NewSessionStore(pool, slog.Default())
+	id := sessionID("100000000002")
+	ctx := context.Background()
+
+	if err := store.CreateSession(ctx, id); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	want := &rag.InterviewState{
+		CurrentQuestionIndex: 2,
+		TotalQuestions:       3,
+		Questions:            []string{"q1", "q2", "q3"},
+		Answers:              []string{"a1", "a2"},
+		Scores:               []int{7, 9},
+		Feedbacks:            []string{"good", "great"},
+		Completed:            false,
+		Passed:               false,
+		TotalScore:           16,
+	}
+	if err := store.SetInterviewState(ctx, id, want); err != nil {
+		t.Fatalf("SetInterviewState: %v", err)
+	}
+
+	got, err := store.GetInterviewState(ctx, id)
+	if err != nil {
+		t.Fatalf("GetInterviewState: %v", err)
+	}
+	if got == nil {
+		t.Fatalf("GetInterviewState returned nil, want populated state")
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("round-trip mismatch:\n got: %+v\nwant: %+v", got, want)
+	}
+}
+
+// TestSetInterviewState_ActivatesSession verifies that SetInterviewState flips
+// interview_active to true as a side effect.
+func TestSetInterviewState_ActivatesSession(t *testing.T) {
+	pool, cleanup := testSessionDB(t)
+	defer cleanup()
+
+	store := db.NewSessionStore(pool, slog.Default())
+	id := sessionID("100000000003")
+	ctx := context.Background()
+
+	if err := store.CreateSession(ctx, id); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	state := &rag.InterviewState{
+		CurrentQuestionIndex: 0,
+		TotalQuestions:       3,
+		Questions:            []string{"q1", "q2", "q3"},
+	}
+	if err := store.SetInterviewState(ctx, id, state); err != nil {
+		t.Fatalf("SetInterviewState: %v", err)
+	}
+
+	active, err := store.IsInterviewActive(ctx, id)
+	if err != nil {
+		t.Fatalf("IsInterviewActive: %v", err)
+	}
+	if !active {
+		t.Error("IsInterviewActive returned false after SetInterviewState, want true")
+	}
+}
+
+// TestClearInterviewState_Resets verifies that ClearInterviewState wipes the
+// stored state (GetInterviewState returns (nil, nil)) and flips
+// interview_active back to false.
+func TestClearInterviewState_Resets(t *testing.T) {
+	pool, cleanup := testSessionDB(t)
+	defer cleanup()
+
+	store := db.NewSessionStore(pool, slog.Default())
+	id := sessionID("100000000004")
+	ctx := context.Background()
+
+	if err := store.CreateSession(ctx, id); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	state := &rag.InterviewState{
+		CurrentQuestionIndex: 1,
+		TotalQuestions:       2,
+		Questions:            []string{"q1", "q2"},
+		Answers:              []string{"a1"},
+		Scores:               []int{8},
+		Feedbacks:            []string{"ok"},
+		TotalScore:           8,
+	}
+	if err := store.SetInterviewState(ctx, id, state); err != nil {
+		t.Fatalf("SetInterviewState: %v", err)
+	}
+
+	if err := store.ClearInterviewState(ctx, id); err != nil {
+		t.Fatalf("ClearInterviewState: %v", err)
+	}
+
+	got, err := store.GetInterviewState(ctx, id)
+	if err != nil {
+		t.Fatalf("GetInterviewState after clear: %v", err)
+	}
+	if got != nil {
+		t.Errorf("GetInterviewState after clear: got %+v, want nil", got)
+	}
+
+	active, err := store.IsInterviewActive(ctx, id)
+	if err != nil {
+		t.Fatalf("IsInterviewActive after clear: %v", err)
+	}
+	if active {
+		t.Error("IsInterviewActive returned true after clear, want false")
+	}
+}
+
+// TestGetInterviewState_MissingSession verifies that GetInterviewState returns
+// (nil, nil) — not an error — for a session row that does not exist.
+func TestGetInterviewState_MissingSession(t *testing.T) {
+	pool, cleanup := testSessionDB(t)
+	defer cleanup()
+
+	store := db.NewSessionStore(pool, slog.Default())
+	ctx := context.Background()
+
+	got, err := store.GetInterviewState(ctx, sessionID("100000000005"))
+	if err != nil {
+		t.Fatalf("GetInterviewState for missing session: %v", err)
+	}
+	if got != nil {
+		t.Errorf("GetInterviewState for missing session: got %+v, want nil", got)
+	}
+}
+
+// TestSetInterviewState_MissingSession verifies that SetInterviewState errors
+// when the target session row does not exist, rather than silently succeeding
+// on a zero-row UPDATE.
+func TestSetInterviewState_MissingSession(t *testing.T) {
+	pool, cleanup := testSessionDB(t)
+	defer cleanup()
+
+	store := db.NewSessionStore(pool, slog.Default())
+	ctx := context.Background()
+
+	state := &rag.InterviewState{TotalQuestions: 1, Questions: []string{"q"}}
+	err := store.SetInterviewState(ctx, sessionID("100000000006"), state)
+	if err == nil {
+		t.Fatal("SetInterviewState for missing session: got nil error, want not-found error")
+	}
+}
+
+// TestClearInterviewState_MissingSession verifies that ClearInterviewState
+// errors when the target session row does not exist.
+func TestClearInterviewState_MissingSession(t *testing.T) {
+	pool, cleanup := testSessionDB(t)
+	defer cleanup()
+
+	store := db.NewSessionStore(pool, slog.Default())
+	ctx := context.Background()
+
+	err := store.ClearInterviewState(ctx, sessionID("100000000007"))
+	if err == nil {
+		t.Fatal("ClearInterviewState for missing session: got nil error, want not-found error")
 	}
 }
