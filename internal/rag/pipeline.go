@@ -3,6 +3,11 @@ package rag
 import (
 	"context"
 	"log/slog"
+	"time"
+
+	"go.opentelemetry.io/otel/metric"
+
+	"github.com/Anthony-Bible/sre-bible/internal/metrics"
 )
 
 const defaultK = 8
@@ -78,6 +83,7 @@ func NewPipeline(embedder QueryEmbedder, searcher ChunkSearcher, generator Gener
 // citations include both vector-retrieved chunk sources and any documents fetched
 // via the fetch_full_document tool during generation.
 func (p *Pipeline) Answer(ctx context.Context, sessionID string, history []Message, question string, onToken func(string) error, onTrace func(TraceStep) error) ([]string, error) {
+	start := time.Now()
 	// Inbound prompt gate: screen for jailbreak / prompt-injection before the model
 	// ever sees the question. A sanitizer error is fail-open (a Model Armor outage
 	// must not take the chat down); a match blocks with a typed sentinel error.
@@ -88,19 +94,25 @@ func (p *Pipeline) Answer(ctx context.Context, sessionID string, history []Messa
 			p.log.ErrorContext(ctx, "model armor check failed; allowing (fail-open)", slog.Any("err", err))
 		case blocked:
 			p.log.WarnContext(ctx, "prompt blocked by model armor", slog.String("reason", reason))
+			metrics.M.LLMResponsesBlocked.Add(ctx, 1, metric.WithAttributes(metrics.AttrString("reason", "model_armor")))
 			return nil, ErrPromptBlocked
 		}
 	}
 
 	queryVec, err := p.embedder.EmbedQuery(ctx, question)
 	if err != nil {
+		metrics.M.LLMErrors.Add(ctx, 1, metric.WithAttributes(metrics.AttrString("stage", "embed")))
 		return nil, err
 	}
 
+	retrievalStart := time.Now()
 	chunks, err := p.searcher.SearchChunks(ctx, queryVec, p.k)
 	if err != nil {
+		metrics.M.LLMErrors.Add(ctx, 1, metric.WithAttributes(metrics.AttrString("stage", "search")))
 		return nil, err
 	}
+	metrics.M.RAGRetrievalDuration.Record(ctx, time.Since(retrievalStart).Seconds())
+	metrics.M.RAGChunksRetrieved.Record(ctx, int64(len(chunks)))
 
 	// Emit the retrieval step on BOTH paths — before the zero-chunk branch — so it
 	// fires even on early return. This is the only place chunk Content is available
@@ -143,8 +155,11 @@ func (p *Pipeline) Answer(ctx context.Context, sessionID string, history []Messa
 	}
 	toolFetched, err := p.generator.StreamAnswer(ctx, messages, tools, onToken, traceForGen)
 	if err != nil {
+		metrics.M.LLMErrors.Add(ctx, 1, metric.WithAttributes(metrics.AttrString("stage", "stream")))
 		return nil, err
 	}
+	metrics.M.LLMResponsesServed.Add(ctx, 1)
+	metrics.M.LLMDuration.Record(ctx, time.Since(start).Seconds())
 
 	// Citations = vector-retrieved chunk sources first (in retrieval order), then any
 	// documents the model fetched via tools, all deduped by DedupeSourceNames.

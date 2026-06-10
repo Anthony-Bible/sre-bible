@@ -12,7 +12,10 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"golang.org/x/sync/errgroup"
 
+	"go.opentelemetry.io/otel/metric"
+
 	"github.com/Anthony-Bible/sre-bible/internal/email"
+	"github.com/Anthony-Bible/sre-bible/internal/metrics"
 	"github.com/Anthony-Bible/sre-bible/internal/rag"
 )
 
@@ -286,6 +289,14 @@ func (c *Client) collectToolResults(ctx context.Context, round int, acc anthropi
 		tu := cb.AsToolUse()
 		c.log.InfoContext(ctx, "tool use", "tool", tu.Name, "round", round+1)
 		text, isErr, sources := c.runTool(ctx, tu, tools, onTrace)
+		outcome := outcomeOK
+		if isErr {
+			outcome = outcomeError
+		}
+		metrics.M.LLMToolCalls.Add(ctx, 1, metric.WithAttributes(
+			metrics.AttrString("tool", tu.Name),
+			metrics.AttrString("outcome", outcome),
+		))
 		results = append(results, anthropic.NewToolResultBlock(tu.ID, text, isErr))
 		fetchedNames = append(fetchedNames, sources...)
 	}

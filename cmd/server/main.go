@@ -19,6 +19,7 @@ import (
 	"github.com/Anthony-Bible/sre-bible/internal/email"
 	"github.com/Anthony-Bible/sre-bible/internal/gemini"
 	"github.com/Anthony-Bible/sre-bible/internal/llm"
+	"github.com/Anthony-Bible/sre-bible/internal/metrics"
 	"github.com/Anthony-Bible/sre-bible/internal/modelarmor"
 	"github.com/Anthony-Bible/sre-bible/internal/rag"
 	"github.com/Anthony-Bible/sre-bible/internal/server"
@@ -84,8 +85,32 @@ func run(log *slog.Logger) error {
 		addr = ":8080"
 	}
 
+	metricsAddr := os.Getenv("METRICS_LISTEN_ADDR")
+	if metricsAddr == "" {
+		metricsAddr = ":9090"
+	}
+	serviceName := os.Getenv("OTEL_SERVICE_NAME")
+	if serviceName == "" {
+		serviceName = "sre-bible"
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	scrapeHandler, metricsShutdown, err := metrics.Init(ctx, serviceName, log)
+	if err != nil {
+		return fmt.Errorf("init metrics: %w", err)
+	}
+	defer func() {
+		if metricsShutdown == nil {
+			return
+		}
+		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := metricsShutdown(sctx); err != nil {
+			log.WarnContext(sctx, "metrics shutdown", slog.Any("err", err))
+		}
+	}()
 
 	pool, err := db.NewPool(ctx, dbURL, log)
 	if err != nil {
@@ -134,11 +159,29 @@ func run(log *slog.Logger) error {
 		// WriteTimeout is intentionally omitted — SSE streams are long-lived.
 	}
 
-	log.Info("server listening", slog.String("addr", addr))
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("GET /metrics", scrapeHandler)
+	metricsMux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+	metricsSrv := &http.Server{
+		Addr:              metricsAddr,
+		Handler:           metricsMux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
 
-	errCh := make(chan error, 1)
+	log.Info("server listening", slog.String("addr", addr))
+	log.Info("metrics listening", slog.String("addr", metricsAddr))
+
+	errCh := make(chan error, 2)
 	go func() {
 		errCh <- httpSrv.ListenAndServe()
+	}()
+	go func() {
+		if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- fmt.Errorf("metrics listener: %w", err)
+		}
 	}()
 
 	select {
@@ -152,6 +195,7 @@ func run(log *slog.Logger) error {
 		log.Info("shutting down", slog.String("reason", ctx.Err().Error()))
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
+		_ = metricsSrv.Shutdown(shutdownCtx)
 		if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 			return fmt.Errorf("shutdown: %w", err)
 		}

@@ -63,6 +63,7 @@ type Server struct {
 	templates        *template.Template
 	log              *slog.Logger
 	mux              *http.ServeMux
+	handler          http.Handler
 }
 
 // defaultSuggestedQuestions returns the prompts shown on first load when there
@@ -107,10 +108,11 @@ func NewServer(pipeline Answerer, sessions SessionRepository, pinger Pinger, tur
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
 
+	s.handler = metricsMiddleware(mux)
 	return s, nil
 }
 
 // ServeHTTP implements http.Handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.mux.ServeHTTP(w, r)
+	s.handler.ServeHTTP(w, r)
 }

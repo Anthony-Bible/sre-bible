@@ -9,6 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/metric"
+
+	"github.com/Anthony-Bible/sre-bible/internal/metrics"
 	"github.com/Anthony-Bible/sre-bible/internal/rag"
 )
 
@@ -168,6 +171,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to initialise session", http.StatusInternalServerError)
 		return
 	}
+	metrics.M.SessionsCreated.Add(ctx, 1)
 
 	// Turnstile gate — skipped when no verifier is configured (tests, local dev without keys).
 	if s.turnstile != nil {
@@ -188,6 +192,14 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 				remoteIP = r.RemoteAddr
 			}
 			tokenOK, verifyErr := s.turnstile.Verify(ctx, token, remoteIP)
+			outcome := "pass"
+			switch {
+			case verifyErr != nil:
+				outcome = "error"
+			case !tokenOK:
+				outcome = "fail"
+			}
+			metrics.M.TurnstileChecks.Add(ctx, 1, metric.WithAttributes(metrics.AttrString("outcome", outcome)))
 			if verifyErr != nil || !tokenOK {
 				s.log.InfoContext(ctx, "turnstile verification failed",
 					slog.Any("err", verifyErr),

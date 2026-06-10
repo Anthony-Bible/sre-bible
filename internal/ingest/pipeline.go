@@ -5,8 +5,12 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"time"
 
+	"go.opentelemetry.io/otel/metric"
 	"golang.org/x/sync/errgroup"
+
+	"github.com/Anthony-Bible/sre-bible/internal/metrics"
 )
 
 // Embedder produces vector embeddings for a batch of texts.
@@ -64,7 +68,17 @@ func NewPipeline(pdfExtractor PDFExtractor, embedder Embedder, describer Describ
 }
 
 // Run ingests a single source (PDF path or URL) end-to-end.
-func (p *Pipeline) Run(ctx context.Context, location string) error {
+func (p *Pipeline) Run(ctx context.Context, location string) (retErr error) {
+	start := time.Now()
+	defer func() {
+		result := "ok"
+		if retErr != nil {
+			result = "error"
+		}
+		metrics.M.IngestSources.Add(ctx, 1, metric.WithAttributes(metrics.AttrString("result", result)))
+		metrics.M.IngestDuration.Record(ctx, time.Since(start).Seconds(), metric.WithAttributes(metrics.AttrString("stage", "total")))
+	}()
+
 	name, srcType, err := DeriveSourceName(location)
 	if err != nil {
 		return fmt.Errorf("derive source name: %w", err)
@@ -89,6 +103,7 @@ func (p *Pipeline) Run(ctx context.Context, location string) error {
 	// Chunk synchronously (pure CPU); describe and embed concurrently (both are network calls).
 	segments := ChunkText(text)
 	p.log.InfoContext(ctx, "chunked source", "name", name, "chunks", len(segments))
+	metrics.M.IngestChunks.Add(ctx, int64(len(segments)))
 
 	var description string
 	var embeddings [][]float32
