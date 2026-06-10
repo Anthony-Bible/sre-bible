@@ -36,6 +36,7 @@ var (
 	_ email.ContactRepository  = (*db.ContactStore)(nil)
 	_ rag.EmailSender          = (*email.BoundSender)(nil)
 	_ rag.JobMatcher           = (*rag.Matcher)(nil)
+	_ rag.Judge                = (*llm.Judge)(nil)
 	_ server.TurnstileVerifier = (*turnstile.Verifier)(nil)
 	_ rag.InterviewStateStore  = (*db.SessionStore)(nil)
 	_ rag.PromptSanitizer      = (*modelarmor.Client)(nil)
@@ -170,7 +171,8 @@ func run(log *slog.Logger) error {
 	}
 
 	matcher := rag.NewMatcher(geminiClient, sourceStore)
-	pipeline := rag.NewPipeline(geminiClient, sourceStore, llmClient, sourceStore, sourceStore, matcher, emailerFactory, 0, log, rag.WithPromptSanitizer(armor), rag.WithFollowUpSuggester(suggester))
+	judge := llm.NewJudge(cfg.anthropicKey, log)
+	pipeline := rag.NewPipeline(geminiClient, sourceStore, llmClient, sourceStore, sourceStore, matcher, emailerFactory, 0, log, rag.WithPromptSanitizer(armor), rag.WithFollowUpSuggester(suggester), rag.WithJudge(judge))
 
 	srv, err := server.NewServer(pipeline, sessionStore, pool, tsVerifier, turnstileSiteKey, log)
 	if err != nil {

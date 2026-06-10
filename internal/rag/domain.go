@@ -196,6 +196,7 @@ type ToolSet struct {
 	Fetcher FullTextFetcher
 	Emailer EmailSender
 	Matcher JobMatcher
+	Judge   Judge
 }
 
 // Generator streams a grounded answer token by token via onToken callback.
