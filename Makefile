@@ -25,7 +25,7 @@ test:
 	TEST_DATABASE_URL=$(TEST_DATABASE_URL) go test ./... -v -count=1
 
 test-unit:
-	go test ./internal/ingest/... ./internal/eval/... ./internal/rag/... ./internal/email/... ./internal/gemini/... ./internal/server/... ./internal/turnstile/... -v -count=1
+	go test ./internal/ingest/... ./internal/eval/... ./internal/rag/... ./internal/email/... ./internal/gemini/... ./internal/modelarmor/... ./internal/server/... ./internal/turnstile/... -v -count=1
 
 test-integration: db-up
 	TEST_DATABASE_URL=$(TEST_DATABASE_URL) go test ./internal/db/... -v -count=1

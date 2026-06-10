@@ -19,6 +19,7 @@ import (
 	"github.com/Anthony-Bible/sre-bible/internal/email"
 	"github.com/Anthony-Bible/sre-bible/internal/gemini"
 	"github.com/Anthony-Bible/sre-bible/internal/llm"
+	"github.com/Anthony-Bible/sre-bible/internal/modelarmor"
 	"github.com/Anthony-Bible/sre-bible/internal/rag"
 	"github.com/Anthony-Bible/sre-bible/internal/server"
 	"github.com/Anthony-Bible/sre-bible/internal/turnstile"
@@ -34,6 +35,7 @@ var (
 	_ rag.JobMatcher           = (*rag.Matcher)(nil)
 	_ server.TurnstileVerifier = (*turnstile.Verifier)(nil)
 	_ rag.InterviewStateStore  = (*db.SessionStore)(nil)
+	_ rag.PromptSanitizer      = (*modelarmor.Client)(nil)
 )
 
 func main() {
@@ -109,8 +111,13 @@ func run(log *slog.Logger) error {
 		return fmt.Errorf("setup emailer: %w", err)
 	}
 
+	armor, err := setupModelArmor(ctx, log)
+	if err != nil {
+		return err
+	}
+
 	matcher := rag.NewMatcher(geminiClient, sourceStore)
-	pipeline := rag.NewPipeline(geminiClient, sourceStore, llmClient, sourceStore, sourceStore, matcher, emailerFactory, 0, log)
+	pipeline := rag.NewPipeline(geminiClient, sourceStore, llmClient, sourceStore, sourceStore, matcher, emailerFactory, 0, log, rag.WithPromptSanitizer(armor))
 
 	srv, err := server.NewServer(pipeline, sessionStore, pool, tsVerifier, turnstileSiteKey, log)
 	if err != nil {
@@ -202,6 +209,24 @@ func setupEmailer(ctx context.Context, pool *pgxpool.Pool, log *slog.Logger, out
 	)
 	*out = func(sid string) rag.EmailSender { return emailSvc.Bind(sid) }
 	return nil
+}
+
+// setupModelArmor reads the required MODEL_ARMOR_TEMPLATE env var and returns a
+// configured prompt sanitizer that gates inbound questions against Model Armor's
+// prompt-injection / jailbreak filters. The template is fatal — a missing value
+// fails startup, mirroring Turnstile. Authentication uses Application Default
+// Credentials (ADC), distinct from Gemini's API key.
+func setupModelArmor(ctx context.Context, log *slog.Logger) (rag.PromptSanitizer, error) {
+	template := strings.TrimSpace(os.Getenv("MODEL_ARMOR_TEMPLATE"))
+	if template == "" {
+		return nil, fmt.Errorf("MODEL_ARMOR_TEMPLATE is required")
+	}
+	client, err := modelarmor.NewClient(ctx, template, log)
+	if err != nil {
+		return nil, fmt.Errorf("create model armor client: %w", err)
+	}
+	log.InfoContext(ctx, "model armor prompt gate enabled", slog.String("template", template))
+	return client, nil
 }
 
 // setupTurnstile reads the two required Turnstile env vars and returns the site key

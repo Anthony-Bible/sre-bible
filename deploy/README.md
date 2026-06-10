@@ -115,6 +115,23 @@ kubectl create secret generic sre-bible-secrets -n sre-bible \
 > proxy handles mTLS to Cloud SQL; the intra-Pod connection is already on
 > loopback.
 
+### 4b. Grant Model Armor access (one-time)
+
+The inbound prompt gate calls Google Cloud Model Armor via Workload Identity
+(ADC) — there is no API key. The `MODEL_ARMOR_TEMPLATE` resource name is set as a
+plain (non-secret) env var in `deployment.yaml`; the server **fails fast at
+startup when it is unset**, so it must be present before ArgoCD syncs. The bound
+GSA needs `roles/modelarmor.user`, and the `sre-bible` template must exist in
+`us-central1` with Prompt-Injection & Jailbreak detection enabled. See
+[ADR 0011](../docs/adr/0011-model-armor-prompt-gate.md).
+
+```bash
+gcloud services enable modelarmor.googleapis.com --project gen-lang-client-0479899208
+gcloud projects add-iam-policy-binding gen-lang-client-0479899208 \
+  --member="serviceAccount:sre-bible-proxy@gen-lang-client-0479899208.iam.gserviceaccount.com" \
+  --role="roles/modelarmor.user"
+```
+
 ### 5. Update deployment.yaml
 
 Replace the placeholder in `deploy/deployment.yaml` with the real

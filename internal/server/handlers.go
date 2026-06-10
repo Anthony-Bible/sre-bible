@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -244,6 +245,13 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return sseToken(w, flusher, tok)
 	}, onTrace)
 	if err != nil {
+		// A Model Armor block is an expected, user-relayable outcome — surface a
+		// friendly refusal rather than the generic failure copy. The gate runs before
+		// any token streams, so a clean error frame is emitted with nothing half-rendered.
+		if errors.Is(err, rag.ErrPromptBlocked) {
+			_ = sseError(w, flusher, "I can't help with that request.")
+			return
+		}
 		s.log.ErrorContext(ctx, "pipeline answer", slog.Any("err", err), slog.String("session", sid))
 		_ = sseError(w, flusher, "failed to generate response")
 		return

@@ -16,6 +16,7 @@ type Pipeline struct {
 	fetcher    FullTextFetcher
 	matcher    JobMatcher
 	emailerFor EmailerFactory
+	sanitizer  PromptSanitizer
 	k          int
 	log        *slog.Logger
 	onToolCall func(string)
@@ -28,6 +29,12 @@ type PipelineOption func(*Pipeline)
 // tool name each time the generator invokes a tool during the agentic loop.
 func WithOnToolCall(fn func(toolName string)) PipelineOption {
 	return func(p *Pipeline) { p.onToolCall = fn }
+}
+
+// WithPromptSanitizer returns a PipelineOption that gates inbound questions through
+// s before embedding or generation. A nil sanitizer (the default) skips the gate.
+func WithPromptSanitizer(s PromptSanitizer) PipelineOption {
+	return func(p *Pipeline) { p.sanitizer = s }
 }
 
 // NewPipeline creates a Pipeline. Pass k=0 to use defaultK (8).
@@ -71,6 +78,20 @@ func NewPipeline(embedder QueryEmbedder, searcher ChunkSearcher, generator Gener
 // citations include both vector-retrieved chunk sources and any documents fetched
 // via the fetch_full_document tool during generation.
 func (p *Pipeline) Answer(ctx context.Context, sessionID string, history []Message, question string, onToken func(string) error, onTrace func(TraceStep) error) ([]string, error) {
+	// Inbound prompt gate: screen for jailbreak / prompt-injection before the model
+	// ever sees the question. A sanitizer error is fail-open (a Model Armor outage
+	// must not take the chat down); a match blocks with a typed sentinel error.
+	if p.sanitizer != nil {
+		blocked, reason, err := p.sanitizer.SanitizePrompt(ctx, question)
+		switch {
+		case err != nil:
+			p.log.ErrorContext(ctx, "model armor check failed; allowing (fail-open)", slog.Any("err", err))
+		case blocked:
+			p.log.WarnContext(ctx, "prompt blocked by model armor", slog.String("reason", reason))
+			return nil, ErrPromptBlocked
+		}
+	}
+
 	queryVec, err := p.embedder.EmbedQuery(ctx, question)
 	if err != nil {
 		return nil, err

@@ -46,6 +46,7 @@ make build-server
 | `ANTHROPIC_API_KEY` | server, query | Claude generation |
 | `TURNSTILE_SITE_KEY` | server | Cloudflare Turnstile (fatal if missing) |
 | `TURNSTILE_SECRET_KEY` | server | Cloudflare Turnstile (fatal if missing) |
+| `MODEL_ARMOR_TEMPLATE` | server | Model Armor prompt-injection gate template resource name (fatal if missing). Auth via ADC, not an API key. |
 | `LISTEN_ADDR` | server | Default `:8080` |
 | `CLAUDE_MODEL` | server | Default `claude-haiku-4-5-20251001` |
 | `LOG_FORMAT` | server | `json` for structured; default text |
@@ -75,11 +76,12 @@ This is a RAG-based conversational agent (`sre.bible`) that answers recruiter/hi
 ### RAG query pipeline (`internal/rag/`)
 
 `rag.Pipeline.Answer(sessionID, history, question, onToken, onStatus)`:
-1. Embed question with Gemini (`RETRIEVAL_QUERY` task type — distinct from `RETRIEVAL_DOCUMENT`).
-2. Cosine-similarity search via pgvector (`<=>` operator), top-k=8 chunks.
-3. Assemble messages (history + enriched current turn with chunk context).
-4. Stream via `llm.Client.StreamAnswer` — Anthropic Claude with agentic tool loop (cap: 5 rounds).
-5. Return deduplicated citation source names (chunks + tool-fetched documents).
+1. **Prompt gate (Model Armor)**: screen the inbound question for jailbreak / prompt-injection via `SanitizeUserPrompt` *before* embedding. A match returns the sentinel `rag.ErrPromptBlocked` (handler maps it to a friendly refusal); a Model Armor API error is **fail-open** (allow + log loudly). Skipped when no sanitizer is configured (`cmd/query`, tests). See ADR 0011.
+2. Embed question with Gemini (`RETRIEVAL_QUERY` task type — distinct from `RETRIEVAL_DOCUMENT`).
+3. Cosine-similarity search via pgvector (`<=>` operator), top-k=8 chunks.
+4. Assemble messages (history + enriched current turn with chunk context).
+5. Stream via `llm.Client.StreamAnswer` — Anthropic Claude with agentic tool loop (cap: 5 rounds).
+6. Return deduplicated citation source names (chunks + tool-fetched documents).
 
 ### Agentic tool loop (`internal/llm/`)
 
