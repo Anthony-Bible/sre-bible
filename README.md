@@ -155,6 +155,7 @@ getComputedStyle(document.getElementById('streaming-trace')).display // 'block' 
 | `ANTHROPIC_API_KEY` | Yes | Chat generation |
 | `TURNSTILE_SITE_KEY` | Yes | Cloudflare Turnstile public key |
 | `TURNSTILE_SECRET_KEY` | Yes | Cloudflare Turnstile secret key |
+| `MODEL_ARMOR_TEMPLATE` | Yes | Model Armor prompt-gate template resource name; auth via ADC (not an API key) |
 | `CLAUDE_MODEL` | No | Default: `claude-haiku-4-5-20251001` |
 | `LISTEN_ADDR` | No | Default: `:8080` |
 | `LOG_FORMAT` | No | `json` for structured logging; default is text |

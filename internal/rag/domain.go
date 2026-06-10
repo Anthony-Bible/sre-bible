@@ -2,6 +2,7 @@ package rag
 
 import (
 	"context"
+	"errors"
 
 	"github.com/Anthony-Bible/sre-bible/internal/email"
 )
@@ -150,6 +151,18 @@ func (d DocumentInfo) String() string {
 type QueryEmbedder interface {
 	EmbedQuery(ctx context.Context, text string) ([]float32, error)
 }
+
+// PromptSanitizer screens a Viewer's question for jailbreak / prompt-injection
+// attempts before embedding or generation. blocked is true when the prompt matched
+// a content filter; reason names the matched filters (for logging only). A non-nil
+// err is an availability failure — Pipeline.Answer treats it as fail-open (allow).
+type PromptSanitizer interface {
+	SanitizePrompt(ctx context.Context, prompt string) (blocked bool, reason string, err error)
+}
+
+// ErrPromptBlocked is returned by Pipeline.Answer when the PromptSanitizer flags the
+// question. The server maps it to a friendly refusal rather than a generic error.
+var ErrPromptBlocked = errors.New("prompt blocked by content policy")
 
 // ChunkSearcher finds the k most semantically similar RetrievedChunks via cosine similarity.
 type ChunkSearcher interface {

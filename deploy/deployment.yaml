@@ -87,6 +87,11 @@ spec:
                 secretKeyRef:
                   name: sre-bible-secrets
                   key: TURNSTILE_SECRET_KEY
+            # Model Armor prompt-injection gate. The template resource name is not a
+            # secret. Auth is via Workload Identity (ADC) on the sre-bible SA, which
+            # must hold roles/modelarmor.user — there is no API key. Fatal if unset.
+            - name: MODEL_ARMOR_TEMPLATE
+              value: "projects/gen-lang-client-0479899208/locations/us-central1/templates/sre-bible"
           livenessProbe:
             httpGet:
               path: /healthz
