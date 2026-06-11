@@ -171,7 +171,6 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to initialise session", http.StatusInternalServerError)
 		return
 	}
-	metrics.M.SessionsCreated.Add(ctx, 1)
 
 	// Turnstile gate — skipped when no verifier is configured (tests, local dev without keys).
 	if s.turnstile != nil {

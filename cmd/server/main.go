@@ -161,10 +161,6 @@ func run(log *slog.Logger) error {
 
 	metricsMux := http.NewServeMux()
 	metricsMux.Handle("GET /metrics", scrapeHandler)
-	metricsMux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	})
 	metricsSrv := &http.Server{
 		Addr:              metricsAddr,
 		Handler:           metricsMux,

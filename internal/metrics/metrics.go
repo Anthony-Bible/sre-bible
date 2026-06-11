@@ -42,9 +42,6 @@ type Metrics struct {
 	HTTPDuration metric.Float64Histogram   // attrs: route, method, unit: s
 	HTTPInFlight metric.Int64UpDownCounter // currently-serving requests ("live")
 
-	// Sessions / visits.
-	SessionsCreated metric.Int64Counter // +1 per CreateSession call
-
 	// LLM / RAG outcomes.
 	LLMResponsesServed  metric.Int64Counter     // successful streamed answers
 	LLMResponsesBlocked metric.Int64Counter     // attr: reason ("model_armor", "turnstile")
@@ -163,13 +160,6 @@ func newMetrics(meter metric.Meter) (*Metrics, error) {
 	if m.HTTPInFlight, err = meter.Int64UpDownCounter(
 		"sre_bible_http_requests_in_flight",
 		metric.WithDescription("HTTP requests currently being handled."),
-	); err != nil {
-		return nil, err
-	}
-
-	if m.SessionsCreated, err = meter.Int64Counter(
-		"sre_bible_sessions_created",
-		metric.WithDescription("Chat sessions created."),
 	); err != nil {
 		return nil, err
 	}

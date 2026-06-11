@@ -289,26 +289,22 @@ func (c *Client) collectToolResults(ctx context.Context, round int, acc anthropi
 		tu := cb.AsToolUse()
 		c.log.InfoContext(ctx, "tool use", "tool", tu.Name, "round", round+1)
 		text, isErr, sources := c.runTool(ctx, tu, tools, onTrace)
-		outcome := outcomeOK
-		if isErr {
-			outcome = outcomeError
-		}
-		metrics.M.LLMToolCalls.Add(ctx, 1, metric.WithAttributes(
-			metrics.AttrString("tool", tu.Name),
-			metrics.AttrString("outcome", outcome),
-		))
 		results = append(results, anthropic.NewToolResultBlock(tu.ID, text, isErr))
 		fetchedNames = append(fetchedNames, sources...)
 	}
 	return results, fetchedNames
 }
 
-// emitToolCall emits a tool_call TraceStep.
+// emitToolCall emits a tool_call TraceStep and records the per-tool metric.
 //
 // PII rule: callers pass curated, PII-free labels and SAFE targets (document names only).
 // For send_contact_email, use emitEmailToolCall instead — it bakes in the PII-free label
 // and empty target so the Viewer's email, draft, and reason can never reach a trace.
-func emitToolCall(onTrace func(rag.TraceStep) error, label, tool, target, outcome string) {
+func emitToolCall(ctx context.Context, onTrace func(rag.TraceStep) error, label, tool, target, outcome string) {
+	metrics.M.LLMToolCalls.Add(ctx, 1, metric.WithAttributes(
+		metrics.AttrString("tool", tool),
+		metrics.AttrString("outcome", outcome),
+	))
 	emitTrace(onTrace, rag.TraceStep{
 		Kind:  rag.TraceKindToolCall,
 		Label: label,
@@ -324,8 +320,8 @@ func emitToolCall(onTrace func(rag.TraceStep) error, label, tool, target, outcom
 // outcome varying. The PII-free label and empty target are hardcoded here so the email
 // path cannot leak the Viewer's name, address, message body, or any refusal reason into a
 // trace even by mistake — the structural enforcement of the PII rule, not just convention.
-func emitEmailToolCall(onTrace func(rag.TraceStep) error, outcome string) {
-	emitToolCall(onTrace, emailTraceLabel, toolSendContactEmail, "", outcome)
+func emitEmailToolCall(ctx context.Context, onTrace func(rag.TraceStep) error, outcome string) {
+	emitToolCall(ctx, onTrace, emailTraceLabel, toolSendContactEmail, "", outcome)
 }
 
 // buildToolParams returns tool definitions for whichever ToolSet fields are non-nil.
@@ -425,7 +421,7 @@ func (c *Client) runTool(ctx context.Context, tu anthropic.ToolUseBlock, tools r
 	case toolSendContactEmail:
 		return c.runSendContactEmail(ctx, tu.Input, tools, onTrace)
 	default:
-		emitToolCall(onTrace, "Unknown tool", tu.Name, "", outcomeError)
+		emitToolCall(ctx, onTrace, "Unknown tool", tu.Name, "", outcomeError)
 		return fmt.Sprintf("unknown tool: %s", tu.Name), true, nil
 	}
 }
@@ -434,10 +430,10 @@ func (c *Client) runListDocuments(ctx context.Context, tools rag.ToolSet, onTrac
 	const label = "Listing available documents…"
 	docs, err := tools.Lister.ListSources(ctx)
 	if err != nil {
-		emitToolCall(onTrace, label, toolListDocuments, "", outcomeError)
+		emitToolCall(ctx, onTrace, label, toolListDocuments, "", outcomeError)
 		return fmt.Sprintf("error listing documents: %v", err), true, nil
 	}
-	emitToolCall(onTrace, label, toolListDocuments, "", outcomeOK)
+	emitToolCall(ctx, onTrace, label, toolListDocuments, "", outcomeOK)
 	if len(docs) == 0 {
 		return "No documents are available in the knowledge base.", false, nil
 	}
@@ -454,20 +450,20 @@ func (c *Client) runFetchFullDocument(ctx context.Context, rawInput json.RawMess
 		SourceName string `json:"source_name"`
 	}
 	if err := json.Unmarshal(rawInput, &input); err != nil {
-		emitToolCall(onTrace, "Reading document…", toolFetchFullDocument, "", outcomeError)
+		emitToolCall(ctx, onTrace, "Reading document…", toolFetchFullDocument, "", outcomeError)
 		return fmt.Sprintf("invalid fetch_full_document arguments: %v", err), true, nil
 	}
 	label := fmt.Sprintf("Reading %s…", input.SourceName)
 	text, found, err := tools.Fetcher.GetFullText(ctx, input.SourceName)
 	if err != nil {
-		emitToolCall(onTrace, label, toolFetchFullDocument, input.SourceName, outcomeError)
+		emitToolCall(ctx, onTrace, label, toolFetchFullDocument, input.SourceName, outcomeError)
 		return fmt.Sprintf("error fetching document: %v", err), true, nil
 	}
 	if !found {
-		emitToolCall(onTrace, label, toolFetchFullDocument, input.SourceName, outcomeNotFound)
+		emitToolCall(ctx, onTrace, label, toolFetchFullDocument, input.SourceName, outcomeNotFound)
 		return fmt.Sprintf("No document named %q is available (or it has no stored full text). Use list_documents to see valid names.", input.SourceName), false, nil
 	}
-	emitToolCall(onTrace, label, toolFetchFullDocument, input.SourceName, outcomeOK)
+	emitToolCall(ctx, onTrace, label, toolFetchFullDocument, input.SourceName, outcomeOK)
 	return text, false, []string{input.SourceName}
 }
 
@@ -482,11 +478,11 @@ func (c *Client) runSendContactEmail(ctx context.Context, rawInput json.RawMessa
 	// label and empty target — the Viewer's name, email, message body, and any refusal
 	// reason are never recorded.
 	if err := json.Unmarshal(rawInput, &input); err != nil {
-		emitEmailToolCall(onTrace, outcomeError)
+		emitEmailToolCall(ctx, onTrace, outcomeError)
 		return fmt.Sprintf("invalid send_contact_email arguments: %v", err), true, nil
 	}
 	if !input.ConfirmedDraft {
-		emitEmailToolCall(onTrace, outcomeRefused)
+		emitEmailToolCall(ctx, onTrace, outcomeRefused)
 		return "You must show the visitor a draft of the email and get their explicit confirmation before sending. Please present the draft and ask the visitor to confirm.", true, nil
 	}
 	ok, reason, err := tools.Emailer.SendContactEmail(ctx, email.ContactEmail{
@@ -496,14 +492,14 @@ func (c *Client) runSendContactEmail(ctx context.Context, rawInput json.RawMessa
 	})
 	if err != nil {
 		c.log.ErrorContext(ctx, "send contact email", slog.Any("err", err))
-		emitEmailToolCall(onTrace, outcomeError)
+		emitEmailToolCall(ctx, onTrace, outcomeError)
 		return "The email could not be sent due to an internal error. Apologize briefly to the visitor and suggest they reach Anthony at linkedin.com/in/anthonybible/ instead.", true, nil
 	}
 	if !ok {
-		emitEmailToolCall(onTrace, outcomeRefused)
+		emitEmailToolCall(ctx, onTrace, outcomeRefused)
 		return reason, true, nil
 	}
-	emitEmailToolCall(onTrace, outcomeOK)
+	emitEmailToolCall(ctx, onTrace, outcomeOK)
 	return "Your message was sent to Anthony successfully. Confirm this to the visitor.", false, nil
 }
 
@@ -551,7 +547,7 @@ func (c *Client) runMatchJobDescription(ctx context.Context, rawInput json.RawMe
 		Requirements []string `json:"requirements"`
 	}
 	if err := json.Unmarshal(rawInput, &input); err != nil {
-		emitToolCall(onTrace, matchTraceLabel, toolMatchJobDescription, "", outcomeError)
+		emitToolCall(ctx, onTrace, matchTraceLabel, toolMatchJobDescription, "", outcomeError)
 		return fmt.Sprintf("invalid match_job_description arguments: %v", err), true, nil
 	}
 
@@ -562,7 +558,7 @@ func (c *Client) runMatchJobDescription(ctx context.Context, rawInput json.RawMe
 		}
 	}
 	if len(reqs) == 0 {
-		emitToolCall(onTrace, matchTraceLabel, toolMatchJobDescription, "", outcomeError)
+		emitToolCall(ctx, onTrace, matchTraceLabel, toolMatchJobDescription, "", outcomeError)
 		return "No requirements provided. Extract the distinct requirements from the job description and pass them as the 'requirements' array.", true, nil
 	}
 	if len(reqs) > maxRequirements {
@@ -599,7 +595,7 @@ func (c *Client) runMatchJobDescription(ctx context.Context, rawInput json.RawMe
 	}
 	if err := g.Wait(); err != nil {
 		c.log.ErrorContext(ctx, "match job description", slog.Any("err", err))
-		emitToolCall(onTrace, matchTraceLabel, toolMatchJobDescription, "", outcomeError)
+		emitToolCall(ctx, onTrace, matchTraceLabel, toolMatchJobDescription, "", outcomeError)
 		return "The evidence search failed due to an internal error. Apologize briefly and suggest the visitor try again.", true, nil
 	}
 
@@ -622,11 +618,11 @@ func (c *Client) runMatchJobDescription(ctx context.Context, rawInput json.RawMe
 
 	payload, err := json.Marshal(out)
 	if err != nil {
-		emitToolCall(onTrace, matchTraceLabel, toolMatchJobDescription, "", outcomeError)
+		emitToolCall(ctx, onTrace, matchTraceLabel, toolMatchJobDescription, "", outcomeError)
 		return fmt.Sprintf("error encoding evidence: %v", err), true, nil
 	}
 
-	emitToolCall(onTrace, matchTraceLabel, toolMatchJobDescription, "", outcomeOK)
+	emitToolCall(ctx, onTrace, matchTraceLabel, toolMatchJobDescription, "", outcomeOK)
 	c.log.InfoContext(ctx, "match job description",
 		"requirements_count", len(reqs),
 		"sources_cited", len(sources),

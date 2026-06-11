@@ -29,7 +29,6 @@ func TestNoopDefault(t *testing.T) {
 	M.IngestChunks.Add(ctx, 12)
 	M.IngestDuration.Record(ctx, 2.5, metric.WithAttributes(AttrString("stage", "total")))
 	M.TurnstileChecks.Add(ctx, 1, metric.WithAttributes(AttrString("outcome", "pass")))
-	M.SessionsCreated.Add(ctx, 1)
 }
 
 // TestInitExposition runs Init, records a few metrics, and confirms the

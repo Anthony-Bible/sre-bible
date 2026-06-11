@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/Anthony-Bible/sre-bible/internal/metrics"
@@ -13,6 +14,11 @@ import (
 // metricsMiddleware records HTTP traffic via metrics.M. Route attribution uses
 // r.Pattern (Go 1.22+ ServeMux), which collapses to the registered pattern
 // rather than the raw URL path, keeping label cardinality bounded.
+//
+// When the underlying writer satisfies http.Flusher, the wrapper passed
+// downstream also satisfies it so SSE streaming continues to work. When it
+// does not, the wrapper does not — the chat handler's `w.(http.Flusher)`
+// check has to keep returning false for non-flushing writers.
 func metricsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -21,36 +27,31 @@ func metricsMiddleware(next http.Handler) http.Handler {
 		metrics.M.HTTPInFlight.Add(ctx, 1)
 		defer metrics.M.HTTPInFlight.Add(ctx, -1)
 
-		base := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
-		var rw http.ResponseWriter = base
-		// Preserve Flusher-ability for SSE: only expose Flush when the underlying
-		// writer actually supports it, so chat-handler's w.(http.Flusher) check
-		// still returns false for non-flushing writers (tests rely on this).
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		var down http.ResponseWriter = rec
 		if _, ok := w.(http.Flusher); ok {
-			rw = &flushingRecorder{statusRecorder: base}
+			down = flusherRecorder{rec}
 		}
-		next.ServeHTTP(rw, r)
+		next.ServeHTTP(down, r)
 
 		route := r.Pattern
 		if route == "" {
 			route = "unmatched"
 		}
-		attrs := metric.WithAttributes(
+		base := []attribute.KeyValue{
 			metrics.AttrString("route", route),
 			metrics.AttrString("method", r.Method),
-		)
-		metrics.M.HTTPDuration.Record(ctx, time.Since(start).Seconds(), attrs)
+		}
+		metrics.M.HTTPDuration.Record(ctx, time.Since(start).Seconds(), metric.WithAttributes(base...))
 		metrics.M.HTTPRequests.Add(ctx, 1, metric.WithAttributes(
-			metrics.AttrString("route", route),
-			metrics.AttrString("method", r.Method),
-			metrics.AttrString("status", strconv.Itoa(base.status)),
+			append(base, metrics.AttrString("status", strconv.Itoa(rec.status)))...,
 		))
 	})
 }
 
-// statusRecorder wraps http.ResponseWriter to capture the response status code
-// for the metrics label. It deliberately does NOT implement http.Flusher to make
-// SSE streaming a compile-time concern — see the Flush passthrough below.
+// statusRecorder captures the response status code for the metrics label.
+// It does NOT implement http.Flusher — Flusher-ability is added by wrapping
+// in flusherRecorder only when the underlying writer is actually flushable.
 type statusRecorder struct {
 	http.ResponseWriter
 	status      int
@@ -65,16 +66,8 @@ func (r *statusRecorder) WriteHeader(code int) {
 	r.ResponseWriter.WriteHeader(code)
 }
 
-// flushingRecorder is statusRecorder + Flusher passthrough, used only when the
-// underlying writer is already a Flusher. Keeping the Flush method off
-// statusRecorder itself preserves the chat handler's ability to detect
-// non-flushing writers via a plain type assertion.
-type flushingRecorder struct {
-	*statusRecorder
-}
+// flusherRecorder is statusRecorder + http.Flusher, used only when the
+// underlying writer already implements Flusher.
+type flusherRecorder struct{ *statusRecorder }
 
-func (r *flushingRecorder) Flush() {
-	if f, ok := r.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
-	}
-}
+func (r flusherRecorder) Flush() { r.ResponseWriter.(http.Flusher).Flush() }
