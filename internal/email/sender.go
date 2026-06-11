@@ -105,6 +105,9 @@ func (s *Service) sendContactEmail(ctx context.Context, sessionID string, e Cont
 		return false, "Please provide a valid email address so Anthony can reply to you.", nil
 	}
 	e.SenderEmail = parsed.Address
+	if isObviouslyFakeEmail(e.SenderEmail) {
+		return false, "That email address looks like a placeholder. Please provide a real address so Anthony can reply to you.", nil
+	}
 	if e.Message == "" {
 		return false, "Please include a message to send to Anthony.", nil
 	}
@@ -154,6 +157,51 @@ func (s *Service) sendContactEmail(ctx context.Context, sessionID string, e Cont
 		slog.String("sender", e.SenderEmail),
 	)
 	return true, "", nil
+}
+
+// fakeEmailDomains catches obvious placeholders the model (or a careless visitor)
+// might try. Covers RFC 2606 / 6761 reserved names plus a couple of common
+// throwaways.
+var fakeEmailDomains = map[string]struct{}{
+	"example.com":        {},
+	"example.org":        {},
+	"example.net":        {},
+	"test.com":           {},
+	"email.com":          {},
+	"domain.com":         {},
+	"mailinator.com":     {},
+	"guerrillamail.com":  {},
+	"password.exchange":  {},
+	"yopmail.com":        {},
+	"10minutemail.com":   {},
+	"trashmail.com":      {},
+	"sharklasers.com":    {},
+}
+
+// fakeEmailTLDs catches reserved or special-use TLDs that can never receive mail.
+var fakeEmailTLDs = map[string]struct{}{
+	"test":      {},
+	"example":   {},
+	"invalid":   {},
+	"localhost": {},
+	"local":     {},
+}
+
+func isObviouslyFakeEmail(addr string) bool {
+	at := strings.LastIndex(addr, "@")
+	if at < 0 {
+		return true
+	}
+	domain := strings.ToLower(addr[at+1:])
+	if _, ok := fakeEmailDomains[domain]; ok {
+		return true
+	}
+	if dot := strings.LastIndex(domain, "."); dot >= 0 {
+		if _, ok := fakeEmailTLDs[domain[dot+1:]]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func linkedInFallback(prefix string) string {
