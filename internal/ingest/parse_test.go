@@ -52,7 +52,7 @@ func assertDeriveSourceName(t *testing.T, tc deriveSourceNameCase) {
 //
 //  1. HTTP URL  → (full URL string, "url", nil)
 //  2. HTTPS URL → (full URL string, "url", nil)
-//  3. .txt file path → (basename, "text", nil)
+//  3. plain-text file path (.txt, .md, .markdown) → (basename, "text", nil)
 //  4. PDF / other file path (no directories) → (basename, "pdf", nil)
 //  5. File path with directory segments → (basename only, inferred type, nil)
 //  6. URL whose scheme prefix is http/https but whose body is unparseable
@@ -100,6 +100,26 @@ func TestDeriveSourceName(t *testing.T) {
 			name:     "absolute path to txt file returns basename and type text",
 			location: "/some/dir/notes.txt",
 			wantName: "notes.txt",
+			wantType: "text",
+		},
+		// Contract 3 variant: Markdown is plain text, not a PDF.
+		{
+			name:     "md filename returns basename and type text",
+			location: "brag-doc.additions.md",
+			wantName: "brag-doc.additions.md",
+			wantType: "text",
+		},
+		{
+			name:     "markdown extension returns basename and type text",
+			location: "docs/notes.markdown",
+			wantName: "notes.markdown",
+			wantType: "text",
+		},
+		// Contract 3 variant: extension matching is case-insensitive.
+		{
+			name:     "uppercase MD extension returns type text",
+			location: "/some/dir/README.MD",
+			wantName: "README.MD",
 			wantType: "text",
 		},
 		// Contract 4: PDF filename — name must be the basename, type must be "pdf".

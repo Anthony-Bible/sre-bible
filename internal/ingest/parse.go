@@ -19,7 +19,7 @@ const (
 )
 
 // DeriveSourceName returns the canonical citation name and source type for a location.
-// URLs return (full URL, "url"); .txt files return (basename, "text"); other file paths return (basename, "pdf").
+// URLs return (full URL, "url"); plain-text files (.txt, .md, .markdown) return (basename, "text"); other file paths return (basename, "pdf").
 func DeriveSourceName(location string) (string, string, error) {
 	if strings.HasPrefix(location, "http://") || strings.HasPrefix(location, "https://") {
 		if _, err := url.Parse(location); err != nil {
@@ -28,7 +28,11 @@ func DeriveSourceName(location string) (string, string, error) {
 		return location, sourceTypeURL, nil
 	}
 	base := filepath.Base(location)
-	if strings.EqualFold(filepath.Ext(base), ".txt") {
+	// Plain-text formats are read verbatim (no model-backed extraction). Markdown
+	// is plain text for ingestion purposes — chunking and embedding operate on the
+	// raw characters either way.
+	switch strings.ToLower(filepath.Ext(base)) {
+	case ".txt", ".md", ".markdown":
 		return base, sourceTypeText, nil
 	}
 	return base, sourceTypePDF, nil
