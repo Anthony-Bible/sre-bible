@@ -72,6 +72,10 @@ const slowMatchThreshold = 3 * time.Second
 // rate-limited us and gemini.retryEmbed is backing off).
 const slowMatchNotice = "This is taking a bit longer than usual — still searching…"
 
+// requirementsTruncatedNotice warns the Viewer when more than maxRequirements
+// were supplied and the tail was discarded before matching.
+const requirementsTruncatedNotice = "Only the first 12 requirements were matched — the rest were dropped."
+
 // send_contact_email field name constants.
 const (
 	fieldSenderName     = "sender_name"
@@ -552,6 +556,7 @@ func (c *Client) runMatchJobDescription(ctx context.Context, rawInput json.RawMe
 	}
 	if len(reqs) > maxRequirements {
 		reqs = reqs[:maxRequirements]
+		emitTrace(onTrace, rag.TraceStep{Kind: rag.TraceKindNotice, Label: requirementsTruncatedNotice})
 	}
 
 	start := time.Now()
