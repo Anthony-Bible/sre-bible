@@ -69,7 +69,7 @@ func TestSendContactEmail_HappyPath(t *testing.T) {
 
 	ok, reason, err := svc.Bind("sess-1").SendContactEmail(context.Background(), email.ContactEmail{
 		SenderName:  "Alice",
-		SenderEmail: "alice@example.com",
+		SenderEmail: "alice@acme.co",
 		Message:     "Hello Anthony",
 	})
 	if err != nil {
@@ -97,7 +97,7 @@ func TestSendContactEmail_AlreadySentRefusal(t *testing.T) {
 
 	ok, reason, err := svc.Bind("sess-dup").SendContactEmail(context.Background(), email.ContactEmail{
 		SenderName:  "Bob",
-		SenderEmail: "bob@example.com",
+		SenderEmail: "bob@acme.co",
 		Message:     "Second message",
 	})
 	if err != nil {
@@ -122,7 +122,7 @@ func TestSendContactEmail_GlobalCapHit(t *testing.T) {
 
 	ok, reason, err := svc.Bind("sess-cap").SendContactEmail(context.Background(), email.ContactEmail{
 		SenderName:  "Carol",
-		SenderEmail: "carol@example.com",
+		SenderEmail: "carol@acme.co",
 		Message:     "Message",
 	})
 	if err != nil {
@@ -150,7 +150,7 @@ func TestSendContactEmail_TransportFailureCompensates(t *testing.T) {
 
 	ok, reason, err := svc.Bind("sess-fail").SendContactEmail(context.Background(), email.ContactEmail{
 		SenderName:  "Dave",
-		SenderEmail: "dave@example.com",
+		SenderEmail: "dave@acme.co",
 		Message:     "Will fail",
 	})
 	if err != nil {
@@ -177,7 +177,7 @@ func TestSendContactEmail_TransportFailure_ReasonHidesInternals(t *testing.T) {
 
 	_, reason, _ := svc.Bind("sess-hide").SendContactEmail(context.Background(), email.ContactEmail{
 		SenderName:  "Eve",
-		SenderEmail: "eve@example.com",
+		SenderEmail: "eve@acme.co",
 		Message:     "Hide internals",
 	})
 
@@ -196,7 +196,7 @@ func TestSendContactEmail_EmptyName(t *testing.T) {
 
 	ok, reason, err := svc.Bind("sess-v1").SendContactEmail(context.Background(), email.ContactEmail{
 		SenderName:  "",
-		SenderEmail: "a@example.com",
+		SenderEmail: "a@acme.co",
 		Message:     "Hello",
 	})
 	if err != nil {
@@ -246,7 +246,7 @@ func TestSendContactEmail_OversizeMessage(t *testing.T) {
 
 	ok, reason, err := svc.Bind("sess-v3").SendContactEmail(context.Background(), email.ContactEmail{
 		SenderName:  "Alice",
-		SenderEmail: "alice@example.com",
+		SenderEmail: "alice@acme.co",
 		Message:     strings.Repeat("x", 5001),
 	})
 	if err != nil {
@@ -271,7 +271,7 @@ func TestSendContactEmail_EmailNormalizedToAddrSpec(t *testing.T) {
 
 	_, _, err := svc.Bind("sess-norm").SendContactEmail(context.Background(), email.ContactEmail{
 		SenderName:  "Alice",
-		SenderEmail: "Alice Liddell <alice@example.com>",
+		SenderEmail: "Alice Liddell <alice@acme.co>",
 		Message:     "Hello",
 	})
 	if err != nil {
@@ -280,7 +280,50 @@ func TestSendContactEmail_EmailNormalizedToAddrSpec(t *testing.T) {
 	if len(repo.records) != 1 {
 		t.Fatalf("expected 1 record, got %d", len(repo.records))
 	}
-	if repo.records[0].SenderEmail != "alice@example.com" {
-		t.Errorf("SenderEmail not normalised: got %q, want %q", repo.records[0].SenderEmail, "alice@example.com")
+	if repo.records[0].SenderEmail != "alice@acme.co" {
+		t.Errorf("SenderEmail not normalised: got %q, want %q", repo.records[0].SenderEmail, "alice@acme.co")
 	}
 }
+
+// TestSendContactEmail_FakePlaceholderRejected covers RFC-reserved and common
+// throwaway domains the model may hallucinate or a visitor may try.
+func TestSendContactEmail_FakePlaceholderRejected(t *testing.T) {
+	t.Parallel()
+	cases := []string{
+		"alice@example.com",
+		"alice@example.org",
+		"bob@test.com",
+		"carol@foo.test",
+		"dave@something.invalid",
+		"eve@mailinator.com",
+		"frank@password.exchange",
+	}
+	for _, addr := range cases {
+		addr := addr
+		t.Run(addr, func(t *testing.T) {
+			t.Parallel()
+			repo := &fakeRepo{}
+			tx := &fakeTransport{}
+			svc := newSvc(repo, tx, 100)
+
+			ok, reason, err := svc.Bind("sess-fake").SendContactEmail(context.Background(), email.ContactEmail{
+				SenderName:  "Visitor",
+				SenderEmail: addr,
+				Message:     "Hello",
+			})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if ok {
+				t.Errorf("expected ok=false for placeholder %q", addr)
+			}
+			if reason == "" {
+				t.Errorf("expected non-empty reason for placeholder %q", addr)
+			}
+			if len(repo.records) != 0 || tx.calls != 0 {
+				t.Errorf("nothing should be recorded or sent for placeholder %q", addr)
+			}
+		})
+	}
+}
+
