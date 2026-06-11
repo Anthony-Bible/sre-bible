@@ -127,6 +127,8 @@ func (p *Pipeline) Answer(ctx context.Context, sessionID string, history []Messa
 		if err := onToken("I couldn't find relevant information in my knowledge base to answer that question."); err != nil {
 			return nil, err
 		}
+		metrics.M.LLMResponsesServed.Add(ctx, 1)
+		metrics.M.LLMDuration.Record(ctx, time.Since(start).Seconds())
 		return nil, nil
 	}
 

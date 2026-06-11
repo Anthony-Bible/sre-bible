@@ -182,6 +182,12 @@ func run(log *slog.Logger) error {
 
 	select {
 	case err := <-errCh:
+		// One listener exited (bind failure, panic, etc.). Tear down the other
+		// before returning so it doesn't keep running orphaned.
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = metricsSrv.Shutdown(shutdownCtx)
+		_ = httpSrv.Shutdown(shutdownCtx)
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}

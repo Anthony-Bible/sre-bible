@@ -122,7 +122,7 @@ AWS SES via `aws-sdk-go-v2`. Rate-limited: at most one email per session, plus a
 
 ### Metrics (`internal/metrics/`)
 
-OpenTelemetry metrics exported to Prometheus. The server runs a second HTTP listener (`METRICS_LISTEN_ADDR`, default `:9090`) that exposes `/metrics` and `/healthz`. Every instrument lives on the package-level singleton `metrics.M` — before `metrics.Init()` runs, `M` is backed by a no-op provider so CLI binaries (`cmd/ingest`, `cmd/query`, tests) work without configuration.
+OpenTelemetry metrics exported to Prometheus. The server runs a second HTTP listener (`METRICS_LISTEN_ADDR`, default `:9090`) that exposes `/metrics`. Every instrument lives on the package-level singleton `metrics.M` — before `metrics.Init()` runs, `M` is backed by a no-op provider so CLI binaries (`cmd/ingest`, `cmd/query`, tests) work without configuration.
 
 **Adding a new metric:**
 
