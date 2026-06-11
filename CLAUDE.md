@@ -51,6 +51,8 @@ make build-server
 | `CLAUDE_MODEL` | server | Default `claude-haiku-4-5-20251001` |
 | `LOG_FORMAT` | server | `json` for structured; default text |
 | `EMAIL_FROM`, `EMAIL_TO`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | server | Optional — enables `send_contact_email` tool |
+| `METRICS_LISTEN_ADDR` | server | Prometheus scrape listener. Default `:9090` (separate from the public chat port). |
+| `OTEL_SERVICE_NAME` | server | Resource attribute attached to every metric. Default `sre-bible`. |
 
 ## Architecture
 
@@ -117,6 +119,19 @@ Interfaces are defined at the **consumption** site (not where they are implement
 ### Email (`internal/email/`)
 
 AWS SES via `aws-sdk-go-v2`. Rate-limited: at most one email per session, plus a global hourly cap (default 24, overridable via `EMAIL_RATE_LIMIT_PER_HOUR`). `BoundSender` carries a session ID for the per-session enforcement.
+
+### Metrics (`internal/metrics/`)
+
+OpenTelemetry metrics exported to Prometheus. The server runs a second HTTP listener (`METRICS_LISTEN_ADDR`, default `:9090`) that exposes `/metrics`. Every instrument lives on the package-level singleton `metrics.M` — before `metrics.Init()` runs, `M` is backed by a no-op provider so CLI binaries (`cmd/ingest`, `cmd/query`, tests) work without configuration.
+
+**Adding a new metric:**
+
+1. Add a field to the `Metrics` struct in `internal/metrics/metrics.go` (`Int64Counter`, `Float64Histogram`, `Int64UpDownCounter`, etc.).
+2. Initialise it inside `newMetrics()` with `meter.Int64Counter("sre_bible_<name>", metric.WithDescription(...))`. Keep the `sre_bible_` prefix.
+3. At the call site, call `metrics.M.YourField.Add(ctx, 1, metric.WithAttributes(metrics.AttrString("key","value")))` or `.Record(ctx, value, ...)`. No constructor wiring needed.
+4. Keep attribute cardinality bounded — never use raw user input as a label value. Use enum-like outcomes (`ok`, `error`, `not_found`, etc.).
+
+Current instruments cover HTTP traffic (requests, duration, in-flight), sessions, LLM outcomes (served, blocked by reason, errors by stage, duration), per-tool calls, RAG retrieval, ingestion stages, and Turnstile checks.
 
 ## Key architectural decisions (see `docs/adr/`)
 
