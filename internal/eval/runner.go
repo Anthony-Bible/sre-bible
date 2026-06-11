@@ -34,7 +34,22 @@ type Runner struct {
 	lister    rag.DocumentLister
 	fetcher   rag.FullTextFetcher
 	judge     Judge
+	k         int // retrieval depth; 0 → rag's default (top-k=8)
 	log       *slog.Logger
+}
+
+// RunnerOption configures an optional Runner behavior.
+type RunnerOption func(*Runner)
+
+// WithRunnerK overrides the retrieval depth (top-k) the Runner's pipeline uses.
+// A non-positive k leaves the rag default (8) in place. The chunking sweep uses
+// this to vary k per config; cmd/eval passes no option and keeps k=8.
+func WithRunnerK(k int) RunnerOption {
+	return func(r *Runner) {
+		if k > 0 {
+			r.k = k
+		}
+	}
 }
 
 // NewRunner creates a Runner. judge may be nil; when nil, judge-based scoring
@@ -47,11 +62,12 @@ func NewRunner(
 	fetcher rag.FullTextFetcher,
 	judge Judge,
 	log *slog.Logger,
+	opts ...RunnerOption,
 ) *Runner {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Runner{
+	r := &Runner{
 		embedder:  embedder,
 		searcher:  searcher,
 		generator: generator,
@@ -60,6 +76,10 @@ func NewRunner(
 		judge:     judge,
 		log:       log,
 	}
+	for _, o := range opts {
+		o(r)
+	}
+	return r
 }
 
 // Run executes a single GoldenCase through the RAG pipeline and returns the
@@ -81,7 +101,7 @@ func (r *Runner) Run(ctx context.Context, c GoldenCase) Result {
 		r.fetcher,
 		nil, // matcher — not used in eval
 		nil, // emailerFor — not used in eval
-		0,   // k=0 → default
+		r.k, // 0 → rag default (top-k=8); sweep overrides via WithRunnerK
 		r.log,
 		rag.WithOnToolCall(onToolCall),
 	)

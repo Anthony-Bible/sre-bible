@@ -377,3 +377,120 @@ func TestChunk_ParagraphBoundaryPreferredOverWordBoundary(t *testing.T) {
 		)
 	}
 }
+
+// -----------------------------------------------------------------------
+// ChunkTextWith: an explicit config drives the chunk geometry. We assert
+// contracts (more/smaller chunks, hard cap respected, full coverage, no empty
+// chunks) rather than exact sizes, so the test survives chunker tuning.
+// -----------------------------------------------------------------------
+
+func TestChunkTextWith_SmallConfigYieldsMoreSmallerChunks(t *testing.T) {
+	t.Parallel()
+
+	input := makeText(5000)
+	small := ChunkConfig{Target: 300, HardCap: 400, Overlap: 50}
+
+	def := ChunkText(input)
+	got := ChunkTextWith(input, small)
+
+	if len(got) <= len(def) {
+		t.Errorf("small config produced %d chunks; want more than default's %d", len(got), len(def))
+	}
+	for i, c := range got {
+		if l := len([]rune(c)); l > small.HardCap {
+			t.Errorf("chunk[%d] length %d exceeds configured hard cap %d", i, l, small.HardCap)
+		}
+		if strings.TrimFunc(c, unicode.IsSpace) == "" {
+			t.Errorf("chunk[%d] is empty or whitespace-only", i)
+		}
+	}
+}
+
+func TestChunkTextWith_FullCoverageUnderSmallConfig(t *testing.T) {
+	t.Parallel()
+
+	input := makeParagraphs(8, 400)
+	cfg := ChunkConfig{Target: 350, HardCap: 450, Overlap: 60}
+	chunks := ChunkTextWith(input, cfg)
+	if len(chunks) == 0 {
+		t.Fatal("ChunkTextWith returned no chunks for non-empty input")
+	}
+
+	// Every non-whitespace rune in the input must appear across the chunks.
+	inputFreq := make(map[rune]int)
+	for _, r := range input {
+		if !unicode.IsSpace(r) {
+			inputFreq[r]++
+		}
+	}
+	chunkFreq := make(map[rune]int)
+	for _, c := range chunks {
+		for _, r := range c {
+			if !unicode.IsSpace(r) {
+				chunkFreq[r]++
+			}
+		}
+	}
+	for r, n := range inputFreq {
+		if chunkFreq[r] < n {
+			t.Errorf("rune %q appears %d times in input but only %d across all chunks", r, n, chunkFreq[r])
+		}
+	}
+}
+
+// TestChunkTextWith_NonPositiveFieldsFallBackToDefault asserts the documented
+// contract: a zero-valued or all-negative config (and an explicit default) all
+// reproduce ChunkText's output exactly.
+func TestChunkTextWith_NonPositiveFieldsFallBackToDefault(t *testing.T) {
+	t.Parallel()
+
+	input := makeParagraphs(6, 500)
+	want := ChunkText(input)
+
+	cases := []struct {
+		name string
+		cfg  ChunkConfig
+	}{
+		{"zero value", ChunkConfig{}},
+		{"all negative", ChunkConfig{Target: -1, HardCap: -1, Overlap: -1}},
+		{"explicit defaults", DefaultChunkConfig()},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := ChunkTextWith(input, tc.cfg)
+			if len(got) != len(want) {
+				t.Fatalf("got %d chunks; want %d (should equal ChunkText)", len(got), len(want))
+			}
+			for i := range got {
+				if got[i] != want[i] {
+					t.Errorf("chunk[%d] differs from ChunkText output", i)
+				}
+			}
+		})
+	}
+}
+
+func TestChunkConfig_WithDefaults(t *testing.T) {
+	t.Parallel()
+
+	d := DefaultChunkConfig()
+	cases := []struct {
+		name string
+		in   ChunkConfig
+		want ChunkConfig
+	}{
+		{"zero value → all defaults", ChunkConfig{}, d},
+		{"only target set", ChunkConfig{Target: 500}, ChunkConfig{Target: 500, HardCap: d.HardCap, Overlap: d.Overlap}},
+		{"negative overlap → default overlap", ChunkConfig{Target: 800, HardCap: 1000, Overlap: -5}, ChunkConfig{Target: 800, HardCap: 1000, Overlap: d.Overlap}},
+		{"all positive → unchanged", ChunkConfig{Target: 700, HardCap: 900, Overlap: 150}, ChunkConfig{Target: 700, HardCap: 900, Overlap: 150}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.in.withDefaults(); got != tc.want {
+				t.Errorf("withDefaults() = %+v; want %+v", got, tc.want)
+			}
+		})
+	}
+}
