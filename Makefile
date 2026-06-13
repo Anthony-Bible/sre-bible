@@ -1,4 +1,4 @@
-.PHONY: db-up db-down migrate test ingest query deps lint serve build-server eval
+.PHONY: db-up db-down migrate test ingest query deps lint serve build-server eval eval-sweep
 
 DATABASE_URL ?= postgres://sre:sre@localhost:5432/sre_bible?sslmode=disable
 TEST_DATABASE_URL ?= $(DATABASE_URL)
@@ -58,3 +58,20 @@ build-server:
 
 eval:
 	EVAL_DATABASE_URL=$(DATABASE_URL) EVAL_GEMINI_API_KEY=$(GEMINI_API_KEY) EVAL_ANTHROPIC_API_KEY=$(ANTHROPIC_API_KEY) go run ./cmd/eval
+
+# Chunking-parameter sweep — DESTRUCTIVE: wipes and re-ingests its target DB, so
+# it must point at a dedicated throwaway database, never the live KB. One-time
+# setup (see the plan's Isolation section):
+#   psql "$$DATABASE_URL" -c 'CREATE DATABASE sre_bible_chunksweep;'
+#   export EVAL_SWEEP_DATABASE_URL="$${DATABASE_URL%/*}/sre_bible_chunksweep"
+# Smoke one config first:  make eval-sweep ARGS="--configs baseline"
+eval-sweep:
+	@if [ -z "$(EVAL_SWEEP_DATABASE_URL)" ]; then \
+		echo "EVAL_SWEEP_DATABASE_URL is required — a dedicated throwaway DB, NOT the live KB."; \
+		echo "  e.g. export EVAL_SWEEP_DATABASE_URL=\"\$${DATABASE_URL%/*}/sre_bible_chunksweep\""; \
+		exit 1; \
+	fi
+	DATABASE_URL=$(EVAL_SWEEP_DATABASE_URL) go run ./cmd/ingest migrate
+	EVAL_DATABASE_URL=$(EVAL_SWEEP_DATABASE_URL) \
+	EVAL_GEMINI_API_KEY=$(GEMINI_API_KEY) EVAL_ANTHROPIC_API_KEY=$(ANTHROPIC_API_KEY) \
+	go run ./cmd/evalsweep $(ARGS)

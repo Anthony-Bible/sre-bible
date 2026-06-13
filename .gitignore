@@ -34,14 +34,23 @@ terraform.tfvars
 .terraform/
 
 # Editor/IDE
-# .idea/
-# .vscode/
+.idea/
+.vscode/
 
-# Claude Code local settings
-.claude/settings.local.json
+# Local AI assistant dirs (Claude Code / Gemini)
+.claude/
+.gemini/
 
 # Build outputs
 bin/
 /query
 /server
 brag-doc.txt
+
+# Downloaded binaries (cloud-sql-proxy fetched for local dev)
+deploy/cloud-sql-proxy
+
+# Eval / chunking-sweep run artifacts — regenerable, see ADR 0012
+/eval/
+judge-output.txt
+fit-scorecard.png

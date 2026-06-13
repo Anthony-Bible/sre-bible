@@ -51,20 +51,39 @@ type Pipeline struct {
 	describer    Describer
 	screener     PIIScreener
 	store        SourceRepository
+	chunkCfg     ChunkConfig
 	log          *slog.Logger
 }
 
-// NewPipeline creates a Pipeline wired with the provided dependencies.
-func NewPipeline(pdfExtractor PDFExtractor, embedder Embedder, describer Describer, screener PIIScreener, urlExtractor URLExtractor, store SourceRepository, log *slog.Logger) *Pipeline {
-	return &Pipeline{
+// Option configures an optional Pipeline behavior. It mirrors the functional-
+// option pattern used by internal/rag so the common four call sites stay
+// unchanged while the eval sweep can override the chunk geometry.
+type Option func(*Pipeline)
+
+// WithChunkConfig overrides the chunk geometry used by Run and Rechunk.
+// Non-positive fields fall back to DefaultChunkConfig. Production callers pass
+// no option and get DefaultChunkConfig.
+func WithChunkConfig(cfg ChunkConfig) Option {
+	return func(p *Pipeline) { p.chunkCfg = cfg.withDefaults() }
+}
+
+// NewPipeline creates a Pipeline wired with the provided dependencies. Without
+// options it chunks with DefaultChunkConfig — identical to the prior behavior.
+func NewPipeline(pdfExtractor PDFExtractor, embedder Embedder, describer Describer, screener PIIScreener, urlExtractor URLExtractor, store SourceRepository, log *slog.Logger, opts ...Option) *Pipeline {
+	p := &Pipeline{
 		pdfExtractor: pdfExtractor,
 		urlExtractor: urlExtractor,
 		embedder:     embedder,
 		describer:    describer,
 		screener:     screener,
 		store:        store,
+		chunkCfg:     DefaultChunkConfig(),
 		log:          log,
 	}
+	for _, o := range opts {
+		o(p)
+	}
+	return p
 }
 
 // Run ingests a single source (PDF path or URL) end-to-end.
@@ -101,7 +120,7 @@ func (p *Pipeline) Run(ctx context.Context, location string) (retErr error) {
 	p.log.InfoContext(ctx, "pii screen complete", "name", name)
 
 	// Chunk synchronously (pure CPU); describe and embed concurrently (both are network calls).
-	segments := ChunkText(text)
+	segments := ChunkTextWith(text, p.chunkCfg)
 	p.log.InfoContext(ctx, "chunked source", "name", name, "chunks", len(segments))
 	metrics.M.IngestChunks.Add(ctx, int64(len(segments)))
 
@@ -170,7 +189,7 @@ func (p *Pipeline) Rechunk(ctx context.Context, src Source) (int, error) {
 		return 0, fmt.Errorf("rechunk %s: no stored full text", src.Name)
 	}
 
-	segments := ChunkText(src.FullText)
+	segments := ChunkTextWith(src.FullText, p.chunkCfg)
 	if len(segments) == 0 {
 		return 0, fmt.Errorf("rechunk %s: chunking produced no segments", src.Name)
 	}

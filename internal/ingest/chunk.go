@@ -6,11 +6,54 @@ const (
 	chunkOverlap = 200
 )
 
+// ChunkConfig carries the three tunable chunking parameters. It exists so callers
+// (notably the eval sweep) can drive the splitter across a grid of settings
+// without touching the production defaults baked into ChunkText.
+type ChunkConfig struct {
+	Target  int // preferred chunk size in chars; split points center near this
+	HardCap int // maximum chunk size in chars; never exceeded
+	Overlap int // chars of overlap carried from one chunk into the next
+}
+
+// DefaultChunkConfig returns the production chunking configuration ChunkText
+// uses. Expressed as a function rather than a package var to satisfy
+// gochecknoglobals — a ChunkConfig cannot be a const.
+func DefaultChunkConfig() ChunkConfig {
+	return ChunkConfig{Target: chunkTarget, HardCap: chunkHardCap, Overlap: chunkOverlap}
+}
+
+// withDefaults returns a copy of c with any non-positive field replaced by the
+// corresponding DefaultChunkConfig value, so a zero-valued or partially filled
+// ChunkConfig degrades to production behavior rather than to a degenerate split.
+func (c ChunkConfig) withDefaults() ChunkConfig {
+	d := DefaultChunkConfig()
+	if c.Target <= 0 {
+		c.Target = d.Target
+	}
+	if c.HardCap <= 0 {
+		c.HardCap = d.HardCap
+	}
+	if c.Overlap <= 0 {
+		c.Overlap = d.Overlap
+	}
+	return c
+}
+
 // ChunkText splits text into overlapping segments targeting ~1000 chars with ~200-char overlap.
 // Hard cap per chunk is 1200 chars. Splits prefer paragraph (\n\n) then newline then word
 // boundary — never mid-word. Returns nil for empty or whitespace-only input.
 func ChunkText(text string) []string {
 	return chunkWithConfig(text, chunkTarget, chunkHardCap, chunkOverlap)
+}
+
+// ChunkTextWith splits text using an explicit ChunkConfig. Any non-positive field
+// in cfg falls back to the DefaultChunkConfig value. All ChunkText invariants
+// (hard cap respected, no mid-word splits, full coverage, no empty chunks) hold
+// for any positive configuration. This is the entry point the eval sweep uses to
+// vary chunk geometry; production paths keep calling ChunkText.
+func ChunkTextWith(text string, cfg ChunkConfig) []string {
+	c := cfg.withDefaults()
+	return chunkWithConfig(text, c.Target, c.HardCap, c.Overlap)
 }
 
 func chunkWithConfig(text string, target, hardCap, overlap int) []string {
@@ -68,8 +111,8 @@ func chunkWithConfig(text string, target, hardCap, overlap int) []string {
 
 // findSplitPoint returns the index (exclusive end) of the best split point
 // for the slice runes[start:]. Boundary quality ranks as \n\n > \n > space > hard cut.
-// Among equal-quality boundaries, the one at or after start+target is preferred so
-// chunks land near the target size rather than splitting as early as possible.
+// Among equal-quality boundaries, the one closest to start+target is preferred so
+// chunks center near the target size rather than drifting toward the hard cap.
 //
 // minSplit is a floor: the returned split point is always > minSplit. The caller
 // passes the previous chunk's split point so that an early boundary already
@@ -86,7 +129,9 @@ func findSplitPoint(runes []rune, start, target, hardCap, minSplit int) int {
 	if preferred > end {
 		preferred = end
 	}
-	// pref floors the high-quality first pass at or after the target size.
+	// pref floors the high-quality first pass at the target size; the forward
+	// scan within [pref, end) then selects the boundary closest to the target
+	// from above, rather than the one nearest the hard cap.
 	// lo floors the widened fallback by two independent concerns: minSplit (the
 	// staircase guard — never re-select a boundary at or before the prior split)
 	// and minFragment (don't split off a leading chunk smaller than half a target,
@@ -98,19 +143,23 @@ func findSplitPoint(runes []rune, start, target, hardCap, minSplit int) int {
 
 	// For each boundary type, try the preferred window first, then widen to the
 	// full [lo, end) window. Quality ordering is preserved across the two windows.
-	if pos, ok := lastParaBreak(runes, pref, end); ok {
+	// The preferred window scans forward (first* — the earliest boundary >= target,
+	// closest to target from above); the widened fallback scans backward (last* —
+	// the latest boundary < target, closest to target from below). Either way the
+	// chosen boundary is the best-quality one nearest the target.
+	if pos, ok := firstParaBreak(runes, pref, end); ok {
 		return pos
 	}
 	if pos, ok := lastParaBreak(runes, lo, end); ok {
 		return pos
 	}
-	if pos, ok := lastNewline(runes, pref, end); ok {
+	if pos, ok := firstNewline(runes, pref, end); ok {
 		return pos
 	}
 	if pos, ok := lastNewline(runes, lo, end); ok {
 		return pos
 	}
-	if pos, ok := lastSpace(runes, pref, end); ok {
+	if pos, ok := firstSpace(runes, pref, end); ok {
 		return pos
 	}
 	if pos, ok := lastSpace(runes, lo, end); ok {
@@ -147,6 +196,36 @@ func lastNewline(runes []rune, lo, end int) (int, bool) {
 // lastSpace returns the position after the last space/tab in runes[lo:end].
 func lastSpace(runes []rune, lo, end int) (int, bool) {
 	for i := end - 1; i >= lo+1; i-- {
+		if runes[i] == ' ' || runes[i] == '\t' {
+			return i + 1, true
+		}
+	}
+	return 0, false
+}
+
+// firstParaBreak returns the position after the first \n\n in runes[lo:end].
+func firstParaBreak(runes []rune, lo, end int) (int, bool) {
+	for i := lo + 1; i < end; i++ {
+		if runes[i] == '\n' && runes[i-1] == '\n' {
+			return i + 1, true
+		}
+	}
+	return 0, false
+}
+
+// firstNewline returns the position after the first \n in runes[lo:end].
+func firstNewline(runes []rune, lo, end int) (int, bool) {
+	for i := lo + 1; i < end; i++ {
+		if runes[i] == '\n' {
+			return i + 1, true
+		}
+	}
+	return 0, false
+}
+
+// firstSpace returns the position after the first space/tab in runes[lo:end].
+func firstSpace(runes []rune, lo, end int) (int, bool) {
+	for i := lo + 1; i < end; i++ {
 		if runes[i] == ' ' || runes[i] == '\t' {
 			return i + 1, true
 		}

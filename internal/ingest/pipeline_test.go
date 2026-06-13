@@ -258,3 +258,49 @@ func TestPipeline_SourceNameDerivedFromTxtFile(t *testing.T) {
 		t.Errorf("Source.Name = %q; want %q", store.receivedSrc.Name, expectedName)
 	}
 }
+
+// TestPipeline_RechunkWithChunkConfigChangesSegmentCount asserts the sweep's
+// load-bearing contract: a non-default WithChunkConfig changes the chunk geometry
+// that Rechunk produces. A smaller target/hardCap must yield strictly more
+// segments than the default chunker over the same FullText, and the stored chunks
+// must match ChunkTextWith(fullText, cfg) exactly — proving the option threads all
+// the way through to what is embedded and persisted, not just the returned count.
+func TestPipeline_RechunkWithChunkConfigChangesSegmentCount(t *testing.T) {
+	t.Parallel()
+
+	fullText := makeParagraphs(6, 500)
+	src := Source{
+		Name:        "resume.pdf",
+		Type:        "pdf",
+		Location:    "/data/resume.pdf",
+		FullText:    fullText,
+		Description: "An SRE résumé.",
+	}
+
+	small := ChunkConfig{Target: 300, HardCap: 400, Overlap: 50}
+	wantSegments := ChunkTextWith(fullText, small)
+	if len(wantSegments) <= len(ChunkText(fullText)) {
+		t.Fatalf("test setup invalid: small config produced %d segments, not more than default's %d",
+			len(wantSegments), len(ChunkText(fullText)))
+	}
+
+	store := &fakeStore{}
+	p := NewPipeline(fakePDFExtractor{}, &fakeEmbedder{}, &fakeDescriber{}, &fakeScreener{}, fakeURLExtractor{}, store,
+		slog.Default(), WithChunkConfig(small))
+
+	n, err := p.Rechunk(context.Background(), src)
+	if err != nil {
+		t.Fatalf("Rechunk() error: %v", err)
+	}
+	if n != len(wantSegments) {
+		t.Errorf("Rechunk returned %d segments; want %d (small config)", n, len(wantSegments))
+	}
+	if len(store.receivedChunks) != len(wantSegments) {
+		t.Fatalf("stored %d chunks; want %d", len(store.receivedChunks), len(wantSegments))
+	}
+	for i, c := range store.receivedChunks {
+		if c.Content != wantSegments[i] {
+			t.Errorf("chunk[%d] content does not match ChunkTextWith output", i)
+		}
+	}
+}
