@@ -54,6 +54,7 @@ func metricsMiddleware(next http.Handler) http.Handler {
 // in flusherRecorder only when the underlying writer is actually flushable.
 type statusRecorder struct {
 	http.ResponseWriter
+
 	status      int
 	wroteHeader bool
 }

@@ -98,6 +98,35 @@ spec:
             # must hold roles/modelarmor.user — there is no API key. Fatal if unset.
             - name: MODEL_ARMOR_TEMPLATE
               value: "projects/gen-lang-client-0479899208/locations/us-central1/templates/sre-bible"
+            # Follow-up suggestion generator backend (suggester only; main chat stays
+            # Anthropic-native). FOLLOWUP_BASE_URL unset → Anthropic default. When set,
+            # FOLLOWUP_MODEL is required (fatal if missing). FOLLOWUP_API_KEY/EXTRA_BODY
+            # are optional. optional:true so a missing secret key degrades to the default
+            # path instead of crash-looping every pod (the app treats all four as optional).
+            - name: FOLLOWUP_BASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: sre-bible-secrets
+                  key: FOLLOWUP_BASE_URL
+                  optional: true
+            - name: FOLLOWUP_MODEL
+              valueFrom:
+                secretKeyRef:
+                  name: sre-bible-secrets
+                  key: FOLLOWUP_MODEL
+                  optional: true
+            - name: FOLLOWUP_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sre-bible-secrets
+                  key: FOLLOWUP_API_KEY
+                  optional: true
+            - name: FOLLOWUP_EXTRA_BODY
+              valueFrom:
+                secretKeyRef:
+                  name: sre-bible-secrets
+                  key: FOLLOWUP_EXTRA_BODY
+                  optional: true
           livenessProbe:
             httpGet:
               path: /healthz

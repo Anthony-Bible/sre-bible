@@ -19,6 +19,14 @@ type Answerer interface {
 	Answer(ctx context.Context, sessionID string, history []rag.Message, question string, onToken func(string) error, onTrace func(rag.TraceStep) error) ([]string, error)
 }
 
+// Suggester is the port for inactivity-triggered follow-up question cards. Satisfied
+// by *rag.Pipeline. Kept separate from Answerer so the endpoint can stay disabled
+// (cards simply never render) for any pipeline that does not implement it — NewServer
+// type-asserts the existing Answerer rather than widening its signature.
+type Suggester interface {
+	SuggestFollowUps(ctx context.Context, history []rag.Message) ([]string, error)
+}
+
 // Pinger is the port for database liveness checks. Satisfied by *pgxpool.Pool.
 type Pinger interface {
 	Ping(ctx context.Context) error
@@ -56,6 +64,7 @@ type TurnstileVerifier interface {
 // Server wires together the RAG pipeline and session store behind HTTP handlers.
 type Server struct {
 	pipeline         Answerer
+	suggester        Suggester
 	sessions         SessionRepository
 	pinger           Pinger
 	turnstile        TurnstileVerifier
@@ -101,10 +110,16 @@ func NewServer(pipeline Answerer, sessions SessionRepository, pinger Pinger, tur
 		log:              log,
 		mux:              mux,
 	}
+	// Enable follow-up suggestions only when the pipeline implements the port. Test
+	// fakes that don't simply leave POST /suggestions returning an empty card list.
+	if sg, ok := pipeline.(Suggester); ok {
+		s.suggester = sg
+	}
 
 	mux.HandleFunc("GET /", s.handleIndex)
 	mux.HandleFunc("GET /messages", s.handleMessages)
 	mux.HandleFunc("POST /chat", s.handleChat)
+	mux.HandleFunc("POST /suggestions", s.handleSuggestions)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
 

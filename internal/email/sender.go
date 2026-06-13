@@ -163,19 +163,19 @@ func (s *Service) sendContactEmail(ctx context.Context, sessionID string, e Cont
 // might try. Covers RFC 2606 / 6761 reserved names plus a couple of common
 // throwaways.
 var fakeEmailDomains = map[string]struct{}{
-	"example.com":        {},
-	"example.org":        {},
-	"example.net":        {},
-	"test.com":           {},
-	"email.com":          {},
-	"domain.com":         {},
-	"mailinator.com":     {},
-	"guerrillamail.com":  {},
-	"password.exchange":  {},
-	"yopmail.com":        {},
-	"10minutemail.com":   {},
-	"trashmail.com":      {},
-	"sharklasers.com":    {},
+	"example.com":       {},
+	"example.org":       {},
+	"example.net":       {},
+	"test.com":          {},
+	"email.com":         {},
+	"domain.com":        {},
+	"mailinator.com":    {},
+	"guerrillamail.com": {},
+	"password.exchange": {},
+	"yopmail.com":       {},
+	"10minutemail.com":  {},
+	"trashmail.com":     {},
+	"sharklasers.com":   {},
 }
 
 // fakeEmailTLDs catches reserved or special-use TLDs that can never receive mail.

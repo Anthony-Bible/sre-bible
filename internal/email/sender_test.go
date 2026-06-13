@@ -299,7 +299,6 @@ func TestSendContactEmail_FakePlaceholderRejected(t *testing.T) {
 		"frank@password.exchange",
 	}
 	for _, addr := range cases {
-		addr := addr
 		t.Run(addr, func(t *testing.T) {
 			t.Parallel()
 			repo := &fakeRepo{}
@@ -326,4 +325,3 @@ func TestSendContactEmail_FakePlaceholderRejected(t *testing.T) {
 		})
 	}
 }
-

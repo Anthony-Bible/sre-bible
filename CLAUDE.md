@@ -53,6 +53,10 @@ make build-server
 | `EMAIL_FROM`, `EMAIL_TO`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | server | Optional — enables `send_contact_email` tool |
 | `METRICS_LISTEN_ADDR` | server | Prometheus scrape listener. Default `:9090` (separate from the public chat port). |
 | `OTEL_SERVICE_NAME` | server | Resource attribute attached to every metric. Default `sre-bible`. |
+| `FOLLOWUP_BASE_URL` | server | Optional — when set, the follow-up suggestion generator (only) switches off Anthropic to an OpenAI-compatible endpoint (OpenRouter, vLLM, Ollama `…/v1`, LM Studio). Unset → Anthropic default. The main chat path is always Anthropic-native. |
+| `FOLLOWUP_MODEL` | server | Required **iff** `FOLLOWUP_BASE_URL` is set (fatal if missing then) — the model id sent to the OpenAI-compatible endpoint. Ignored otherwise. |
+| `FOLLOWUP_API_KEY` | server | Optional — bearer token for the OpenAI-compatible endpoint. Omit for local servers that need no auth (an empty value sends no `Authorization` header). |
+| `FOLLOWUP_EXTRA_BODY` | server | Optional — JSON object merged into every follow-up request body (provider-neutral escape hatch for non-standard fields). Only read when `FOLLOWUP_BASE_URL` is set; invalid JSON is fatal at startup. Use it to disable a thinking model's reasoning so the tight token cap isn't consumed before any content is produced — e.g. GLM: `{"thinking":{"type":"disabled"}}`, OpenRouter: `{"reasoning":{"enabled":false}}`, vLLM: `{"chat_template_kwargs":{"enable_thinking":false}}`. Caveat: some routing aliases (e.g. synthetic.new `syn:*`) silently drop the `thinking` passthrough — there, suppress reasoning with the standard `{"reasoning_effort":"low"}` instead, or the model burns the whole cap on hidden reasoning and returns empty content. |
 
 ## Architecture
 
@@ -97,6 +101,7 @@ Three tools the model may invoke:
 - `GET /` — renders `templates/index.html` with suggested questions and Turnstile site key.
 - `GET /messages` — returns session message history as JSON; session ID from cookie.
 - `POST /chat` — Cloudflare Turnstile gate (on first request per session), then runs RAG pipeline, streams response as SSE, persists both turns.
+- `POST /suggestions` — returns up to `rag.MaxFollowUps` (2) LLM-generated follow-up questions as `{"questions":[...]}`, grounded in the session's recent history + document catalog. Lazy, inactivity-triggered by the frontend. Requires the session to already be Turnstile-verified (else `403`, no LLM call); every other failure degrades silently to `{"questions":[]}` with `200`. Ephemeral — never persisted. See `pipeline.SuggestFollowUps` and the `rag.FollowUpSuggester` port.
 - `GET /healthz` / `GET /readyz` — liveness (always 200) / readiness (DB ping).
 
 SSE events: `token` (text delta), `status` (transient tool-use message), `done` (citations JSON), `error`.

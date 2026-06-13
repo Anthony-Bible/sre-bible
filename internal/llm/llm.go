@@ -43,7 +43,16 @@ const (
 	toolFetchFullDocument   = "fetch_full_document"
 	toolSendContactEmail    = "send_contact_email"
 	toolMatchJobDescription = "match_job_description"
+	// toolSuggestQuestions is the forced tool SuggestFollowUps uses to coerce the
+	// model into returning a JSON {questions:[...]} object instead of prose.
+	toolSuggestQuestions = "suggest_questions"
 )
+
+// fieldQuestions is the schema property + JSON key for the suggest_questions tool input.
+const fieldQuestions = "questions"
+
+// typeToolUse is the content-block type the Anthropic SDK uses for a model tool call.
+const typeToolUse = "tool_use"
 
 // schema map key constants (used in buildToolParams property maps).
 const (
@@ -142,15 +151,7 @@ func NewClient(apiKey, model, baseSystemPrompt string, personas map[rag.PersonaM
 // non-error return. The pipeline emits the retrieval step that precedes these.
 func (c *Client) StreamAnswer(ctx context.Context, messages []rag.Message, tools rag.ToolSet, onToken func(string) error, onTrace func(rag.TraceStep) error) ([]string, error) {
 	start := time.Now()
-	params := make([]anthropic.MessageParam, 0, len(messages)+2*maxToolRounds)
-	for _, m := range messages {
-		switch m.Role {
-		case rag.RoleUser:
-			params = append(params, anthropic.NewUserMessage(anthropic.NewTextBlock(m.Content)))
-		case rag.RoleAssistant:
-			params = append(params, anthropic.NewAssistantMessage(anthropic.NewTextBlock(m.Content)))
-		}
-	}
+	params := toMessageParams(messages, 2*maxToolRounds)
 
 	toolParams := buildToolParams(tools)
 	var fetchedNames []string
@@ -184,6 +185,88 @@ func (c *Client) StreamAnswer(ctx context.Context, messages []rag.Message, tools
 	c.log.InfoContext(ctx, "stream complete (tool cap hit)", "model", c.model)
 	emitAnswerStep(onTrace, maxToolRounds, start)
 	return fetchedNames, nil
+}
+
+// SuggestFollowUps does a single non-streaming generation with a forced
+// suggest_questions tool, so the result is guaranteed-valid JSON rather than prose to
+// parse. It runs no agentic loop and advertises no RAG tools. systemPrompt is the
+// scope-locked rag.FollowUpSystemPrompt; messages is the recent history plus a final
+// user turn carrying the document catalog. It returns up to maxQuestions trimmed,
+// non-empty questions. Any API, protocol, or JSON error is returned so the caller can
+// degrade to "no cards". Implements rag.FollowUpSuggester.
+func (c *Client) SuggestFollowUps(ctx context.Context, systemPrompt string, messages []rag.Message, maxQuestions int) ([]string, error) {
+	params := toMessageParams(messages, 0)
+
+	tool := anthropic.ToolParam{
+		Name:        toolSuggestQuestions,
+		Description: anthropic.String("Return the proposed follow-up questions as a JSON array of short strings."),
+		InputSchema: anthropic.ToolInputSchemaParam{
+			Properties: map[string]any{
+				fieldQuestions: map[string]any{
+					schemaType:        schemaTypeArray,
+					schemaDescription: "The proposed follow-up questions, each a short string phrased in the visitor's voice.",
+					schemaItems:       map[string]any{schemaType: schemaTypeString},
+				},
+			},
+			Required: []string{fieldQuestions},
+		},
+	}
+
+	reqParams := anthropic.MessageNewParams{
+		Model:     c.model,
+		MaxTokens: rag.MaxFollowUpTokens,
+		System:    []anthropic.TextBlockParam{{Text: systemPrompt}},
+		Messages:  params,
+		Tools:     []anthropic.ToolUnionParam{{OfTool: &tool}},
+		ToolChoice: anthropic.ToolChoiceUnionParam{
+			OfTool: &anthropic.ToolChoiceToolParam{Name: toolSuggestQuestions},
+		},
+	}
+	if c.temperature != nil {
+		reqParams.Temperature = anthropic.Float(*c.temperature)
+	}
+
+	msg, err := c.inner.Messages.New(ctx, reqParams)
+	if err != nil {
+		return nil, fmt.Errorf("suggest follow-ups: %w", err)
+	}
+	return parseSuggestedQuestions(msg, maxQuestions)
+}
+
+// parseSuggestedQuestions extracts the questions from the forced suggest_questions
+// tool_use block in msg, trimming blanks and capping to maxQuestions. It errors when no
+// tool_use block is present or its input is not the expected {questions:[...]} shape.
+func parseSuggestedQuestions(msg *anthropic.Message, maxQuestions int) ([]string, error) {
+	for _, cb := range msg.Content {
+		if cb.Type != typeToolUse {
+			continue
+		}
+		tu := cb.AsToolUse()
+		var out struct {
+			Questions []string `json:"questions"`
+		}
+		if err := json.Unmarshal(tu.Input, &out); err != nil {
+			return nil, fmt.Errorf("suggest follow-ups: decode tool input: %w", err)
+		}
+		return rag.CapQuestions(out.Questions, maxQuestions), nil
+	}
+	return nil, fmt.Errorf("suggest follow-ups: no %s tool_use block in response", toolSuggestQuestions)
+}
+
+// toMessageParams maps rag.Messages to Anthropic MessageParams as user/assistant text
+// blocks. extraCap reserves slack for params the caller appends after the history (e.g.
+// per-round tool-result turns in StreamAnswer); pass 0 when nothing is appended.
+func toMessageParams(messages []rag.Message, extraCap int) []anthropic.MessageParam {
+	params := make([]anthropic.MessageParam, 0, len(messages)+extraCap)
+	for _, m := range messages {
+		switch m.Role {
+		case rag.RoleUser:
+			params = append(params, anthropic.NewUserMessage(anthropic.NewTextBlock(m.Content)))
+		case rag.RoleAssistant:
+			params = append(params, anthropic.NewAssistantMessage(anthropic.NewTextBlock(m.Content)))
+		}
+	}
+	return params
 }
 
 // buildRequestParams assembles the per-round Anthropic request: the system
@@ -283,7 +366,7 @@ func (c *Client) collectToolResults(ctx context.Context, round int, acc anthropi
 	var results []anthropic.ContentBlockParamUnion
 	var fetchedNames []string
 	for _, cb := range acc.Content {
-		if cb.Type != "tool_use" {
+		if cb.Type != typeToolUse {
 			continue
 		}
 		tu := cb.AsToolUse()

@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"context"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -49,7 +50,7 @@ func TestInitExposition(t *testing.T) {
 	M.LLMResponsesBlocked.Add(ctx, 1, metric.WithAttributes(AttrString("reason", "model_armor")))
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/metrics", nil)
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	handler.ServeHTTP(rec, req)
 
 	body := rec.Body.String()
