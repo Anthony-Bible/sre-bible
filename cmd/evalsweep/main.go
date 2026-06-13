@@ -34,6 +34,7 @@ import (
 	"github.com/Anthony-Bible/sre-bible/internal/gemini"
 	"github.com/Anthony-Bible/sre-bible/internal/ingest"
 	"github.com/Anthony-Bible/sre-bible/internal/llm"
+	applog "github.com/Anthony-Bible/sre-bible/internal/log"
 	"github.com/Anthony-Bible/sre-bible/internal/rag"
 )
 
@@ -81,11 +82,11 @@ func grid() []sweepConfig {
 }
 
 func main() {
-	lvl := slog.LevelInfo
+	lvl := applog.ParseLevel(os.Getenv("LOG_LEVEL"))
 	if os.Getenv("EVAL_DEBUG") != "" {
 		lvl = slog.LevelDebug
 	}
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl}))
+	log := applog.New(os.Stderr, os.Getenv("LOG_FORMAT"), lvl)
 
 	if err := run(log); err != nil {
 		log.Error("fatal", "err", err)

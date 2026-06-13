@@ -19,6 +19,7 @@ import (
 	"github.com/Anthony-Bible/sre-bible/internal/email"
 	"github.com/Anthony-Bible/sre-bible/internal/gemini"
 	"github.com/Anthony-Bible/sre-bible/internal/llm"
+	applog "github.com/Anthony-Bible/sre-bible/internal/log"
 	"github.com/Anthony-Bible/sre-bible/internal/metrics"
 	"github.com/Anthony-Bible/sre-bible/internal/modelarmor"
 	"github.com/Anthony-Bible/sre-bible/internal/rag"
@@ -40,13 +41,7 @@ var (
 )
 
 func main() {
-	var handler slog.Handler
-	if os.Getenv("LOG_FORMAT") == "json" {
-		handler = slog.NewJSONHandler(os.Stderr, nil)
-	} else {
-		handler = slog.NewTextHandler(os.Stderr, nil)
-	}
-	log := slog.New(handler)
+	log := applog.New(os.Stderr, os.Getenv("LOG_FORMAT"), applog.ParseLevel(os.Getenv("LOG_LEVEL")))
 
 	if err := run(log); err != nil {
 		log.Error("fatal", slog.Any("err", err))
