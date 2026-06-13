@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -19,6 +20,7 @@ import (
 	"github.com/Anthony-Bible/sre-bible/internal/email"
 	"github.com/Anthony-Bible/sre-bible/internal/gemini"
 	"github.com/Anthony-Bible/sre-bible/internal/llm"
+	"github.com/Anthony-Bible/sre-bible/internal/llm/openaicompat"
 	"github.com/Anthony-Bible/sre-bible/internal/metrics"
 	"github.com/Anthony-Bible/sre-bible/internal/modelarmor"
 	"github.com/Anthony-Bible/sre-bible/internal/rag"
@@ -37,6 +39,9 @@ var (
 	_ server.TurnstileVerifier = (*turnstile.Verifier)(nil)
 	_ rag.InterviewStateStore  = (*db.SessionStore)(nil)
 	_ rag.PromptSanitizer      = (*modelarmor.Client)(nil)
+	_ server.Suggester         = (*rag.Pipeline)(nil)
+	_ rag.FollowUpSuggester    = (*llm.Client)(nil)
+	_ rag.FollowUpSuggester    = (*openaicompat.Suggester)(nil)
 )
 
 func main() {
@@ -54,20 +59,57 @@ func main() {
 	}
 }
 
+// serverConfig holds the env-derived configuration for the HTTP server. Required
+// values are validated in loadServerConfig; optional values carry their defaults.
+type serverConfig struct {
+	dbURL        string
+	geminiKey    string
+	anthropicKey string
+	model        string
+	addr         string
+	metricsAddr  string
+	serviceName  string
+}
+
+// loadServerConfig reads and validates configuration from the environment. The three
+// credential vars are fatal when unset; the rest fall back to sensible defaults.
+func loadServerConfig() (serverConfig, error) {
+	cfg := serverConfig{
+		dbURL:        os.Getenv("DATABASE_URL"),
+		geminiKey:    os.Getenv("GEMINI_API_KEY"),
+		anthropicKey: os.Getenv("ANTHROPIC_API_KEY"),
+		model:        os.Getenv("CLAUDE_MODEL"),
+		addr:         os.Getenv("LISTEN_ADDR"),
+		metricsAddr:  os.Getenv("METRICS_LISTEN_ADDR"),
+		serviceName:  os.Getenv("OTEL_SERVICE_NAME"),
+	}
+	switch {
+	case cfg.dbURL == "":
+		return cfg, fmt.Errorf("DATABASE_URL is required")
+	case cfg.geminiKey == "":
+		return cfg, fmt.Errorf("GEMINI_API_KEY is required")
+	case cfg.anthropicKey == "":
+		return cfg, fmt.Errorf("ANTHROPIC_API_KEY is required")
+	}
+	if cfg.model == "" {
+		cfg.model = "claude-haiku-4-5-20251001"
+	}
+	if cfg.addr == "" {
+		cfg.addr = ":8080"
+	}
+	if cfg.metricsAddr == "" {
+		cfg.metricsAddr = ":9090"
+	}
+	if cfg.serviceName == "" {
+		cfg.serviceName = "sre-bible"
+	}
+	return cfg, nil
+}
+
 func run(log *slog.Logger) error {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		return fmt.Errorf("DATABASE_URL is required")
-	}
-
-	geminiKey := os.Getenv("GEMINI_API_KEY")
-	if geminiKey == "" {
-		return fmt.Errorf("GEMINI_API_KEY is required")
-	}
-
-	anthropicKey := os.Getenv("ANTHROPIC_API_KEY")
-	if anthropicKey == "" {
-		return fmt.Errorf("ANTHROPIC_API_KEY is required")
+	cfg, err := loadServerConfig()
+	if err != nil {
+		return err
 	}
 
 	turnstileSiteKey, tsVerifier, err := setupTurnstile(log)
@@ -75,29 +117,10 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
-	model := os.Getenv("CLAUDE_MODEL")
-	if model == "" {
-		model = "claude-haiku-4-5-20251001"
-	}
-
-	addr := os.Getenv("LISTEN_ADDR")
-	if addr == "" {
-		addr = ":8080"
-	}
-
-	metricsAddr := os.Getenv("METRICS_LISTEN_ADDR")
-	if metricsAddr == "" {
-		metricsAddr = ":9090"
-	}
-	serviceName := os.Getenv("OTEL_SERVICE_NAME")
-	if serviceName == "" {
-		serviceName = "sre-bible"
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	scrapeHandler, metricsShutdown, err := metrics.Init(ctx, serviceName, log)
+	scrapeHandler, metricsShutdown, err := metrics.Init(ctx, cfg.serviceName, log)
 	if err != nil {
 		return fmt.Errorf("init metrics: %w", err)
 	}
@@ -112,7 +135,7 @@ func run(log *slog.Logger) error {
 		}
 	}()
 
-	pool, err := db.NewPool(ctx, dbURL, log)
+	pool, err := db.NewPool(ctx, cfg.dbURL, log)
 	if err != nil {
 		return fmt.Errorf("connect to database: %w", err)
 	}
@@ -122,14 +145,19 @@ func run(log *slog.Logger) error {
 		return fmt.Errorf("migrate: %w", err)
 	}
 
-	geminiClient, err := gemini.NewClient(ctx, geminiKey, log)
+	geminiClient, err := gemini.NewClient(ctx, cfg.geminiKey, log)
 	if err != nil {
 		return fmt.Errorf("create gemini client: %w", err)
 	}
 
 	sourceStore := db.NewSourceStore(pool, log)
 	sessionStore := db.NewSessionStore(pool, log)
-	llmClient := llm.NewClient(anthropicKey, model, rag.BaseSystemPrompt, rag.DefaultPersonas(), log)
+	llmClient := llm.NewClient(cfg.anthropicKey, cfg.model, rag.BaseSystemPrompt, rag.DefaultPersonas(), log)
+
+	suggester, err := setupFollowUpSuggester(llmClient, log)
+	if err != nil {
+		return err
+	}
 
 	var emailerFactory rag.EmailerFactory
 	if err := setupEmailer(ctx, pool, log, &emailerFactory); err != nil {
@@ -142,13 +170,19 @@ func run(log *slog.Logger) error {
 	}
 
 	matcher := rag.NewMatcher(geminiClient, sourceStore)
-	pipeline := rag.NewPipeline(geminiClient, sourceStore, llmClient, sourceStore, sourceStore, matcher, emailerFactory, 0, log, rag.WithPromptSanitizer(armor))
+	pipeline := rag.NewPipeline(geminiClient, sourceStore, llmClient, sourceStore, sourceStore, matcher, emailerFactory, 0, log, rag.WithPromptSanitizer(armor), rag.WithFollowUpSuggester(suggester))
 
 	srv, err := server.NewServer(pipeline, sessionStore, pool, tsVerifier, turnstileSiteKey, log)
 	if err != nil {
 		return fmt.Errorf("create server: %w", err)
 	}
 
+	return serveHTTP(ctx, stop, srv, scrapeHandler, cfg.addr, cfg.metricsAddr, log)
+}
+
+// serveHTTP runs the public chat listener and the metrics listener concurrently and
+// blocks until one exits or ctx is cancelled, then gracefully tears down both.
+func serveHTTP(ctx context.Context, stop context.CancelFunc, srv http.Handler, scrapeHandler http.Handler, addr, metricsAddr string, log *slog.Logger) error {
 	httpSrv := &http.Server{
 		Addr:    addr,
 		Handler: srv,
@@ -167,8 +201,8 @@ func run(log *slog.Logger) error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	log.Info("server listening", slog.String("addr", addr))
-	log.Info("metrics listening", slog.String("addr", metricsAddr))
+	log.InfoContext(ctx, "server listening", slog.String("addr", addr))
+	log.InfoContext(ctx, "metrics listening", slog.String("addr", metricsAddr))
 
 	errCh := make(chan error, 2)
 	go func() {
@@ -194,7 +228,7 @@ func run(log *slog.Logger) error {
 		return err
 	case <-ctx.Done():
 		stop()
-		log.Info("shutting down", slog.String("reason", ctx.Err().Error()))
+		log.InfoContext(ctx, "shutting down", slog.String("reason", ctx.Err().Error()))
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		_ = metricsSrv.Shutdown(shutdownCtx)
@@ -273,6 +307,32 @@ func setupModelArmor(ctx context.Context, log *slog.Logger) (rag.PromptSanitizer
 	}
 	log.InfoContext(ctx, "model armor prompt gate enabled", slog.String("template", template))
 	return client, nil
+}
+
+// setupFollowUpSuggester picks the provider for inactivity-triggered follow-up
+// question cards. The default is the Anthropic llmClient (same model as the main
+// chat path). Setting FOLLOWUP_BASE_URL switches to any OpenAI-compatible endpoint
+// (OpenRouter, vLLM, Ollama …/v1, LM Studio); FOLLOWUP_MODEL is then required and
+// FOLLOWUP_API_KEY is optional (local servers may need no auth).
+func setupFollowUpSuggester(llmClient *llm.Client, log *slog.Logger) (rag.FollowUpSuggester, error) {
+	base := os.Getenv("FOLLOWUP_BASE_URL")
+	if base == "" {
+		return llmClient, nil
+	}
+	model := os.Getenv("FOLLOWUP_MODEL")
+	if model == "" {
+		return nil, fmt.Errorf("FOLLOWUP_MODEL is required when FOLLOWUP_BASE_URL is set")
+	}
+	var extraBody map[string]any
+	if raw := os.Getenv("FOLLOWUP_EXTRA_BODY"); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &extraBody); err != nil {
+			return nil, fmt.Errorf("FOLLOWUP_EXTRA_BODY must be a JSON object: %w", err)
+		}
+	}
+	log.Info("follow-up suggestions using OpenAI-compatible endpoint",
+		slog.String("base_url", base), slog.String("model", model),
+		slog.Int("extra_body_keys", len(extraBody)))
+	return openaicompat.New(base, os.Getenv("FOLLOWUP_API_KEY"), model, extraBody, log), nil
 }
 
 // setupTurnstile reads the two required Turnstile env vars and returns the site key

@@ -68,6 +68,12 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// Deadpool Mode toggle values carried by the X-Deadpool-Mode request header.
+const (
+	deadpoolHeaderOn  = "true"
+	deadpoolHeaderOff = "false"
+)
+
 // resolvePersonaMode extracts the Deadpool Mode header/query preference, updates the DB if needed, and returns the updated context carrying the PersonaMode.
 func (s *Server) resolvePersonaMode(ctx context.Context, sid string, r *http.Request) context.Context {
 	isDeadpool, err := s.sessions.IsDeadpoolMode(ctx, sid)
@@ -80,10 +86,10 @@ func (s *Server) resolvePersonaMode(ctx context.Context, sid string, r *http.Req
 
 	shouldBeDeadpool := isDeadpool
 	hasPreference := false
-	if headerVal == "true" || queryVal == "deadpool" {
+	if headerVal == deadpoolHeaderOn || queryVal == "deadpool" {
 		shouldBeDeadpool = true
 		hasPreference = true
-	} else if headerVal == "false" || queryVal == "normal" {
+	} else if headerVal == deadpoolHeaderOff || queryVal == "normal" {
 		shouldBeDeadpool = false
 		hasPreference = true
 	}
@@ -145,6 +151,130 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(b)
 }
 
+// suggestionsDTO is the JSON shape returned by POST /suggestions. Questions is always a
+// non-nil array so the client iterates without a null check.
+type suggestionsDTO struct {
+	Questions []string `json:"questions"`
+}
+
+// writeSuggestions writes a 200 JSON {"questions":[...]} body, normalising nil to an
+// empty array. Encode errors are intentionally swallowed: a failed suggestion response
+// must never surface as an error in the UI (silent no-cards).
+func writeSuggestions(w http.ResponseWriter, questions []string) {
+	if questions == nil {
+		questions = []string{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(suggestionsDTO{Questions: questions})
+}
+
+// handleSuggestions returns up to rag.MaxFollowUps LLM-generated follow-up questions for
+// the session, grounded in its recent history and the document catalog. It is the lazy,
+// inactivity-triggered backend for the suggestion cards. Every failure degrades silently
+// to an empty list with HTTP 200 — a missing suggestion must never surface as an error in
+// the UI. The one hard gate is abuse: an unverified session (when Turnstile is configured)
+// gets 403 with no LLM call.
+func (s *Server) handleSuggestions(w http.ResponseWriter, r *http.Request) {
+	sid, ok := requireSession(w, r)
+	if !ok {
+		return
+	}
+	ctx := r.Context()
+
+	// Abuse gate: require the session to have already passed Turnstile via /chat.
+	// Skipped when no verifier is configured (tests, local dev without keys).
+	if s.turnstile != nil {
+		verified, err := s.sessions.IsSessionVerified(ctx, sid)
+		if err != nil {
+			s.log.ErrorContext(ctx, "check session verified", slog.Any("err", err), slog.String("session", sid))
+			http.Error(w, "session error", http.StatusInternalServerError)
+			return
+		}
+		if !verified {
+			metrics.M.FollowUpSuggestions.Add(ctx, 1, metric.WithAttributes(metrics.AttrString("status", "unverified")))
+			http.Error(w, "verification required", http.StatusForbidden)
+			return
+		}
+	}
+
+	// Feature disabled (pipeline does not implement Suggester): no cards.
+	if s.suggester == nil {
+		writeSuggestions(w, nil)
+		return
+	}
+
+	stored, err := s.sessions.ListMessages(ctx, sid)
+	if err != nil {
+		s.log.ErrorContext(ctx, "list messages", slog.Any("err", err), slog.String("session", sid))
+		writeSuggestions(w, nil)
+		return
+	}
+	if len(stored) == 0 {
+		writeSuggestions(w, nil)
+		return
+	}
+
+	questions, err := s.suggester.SuggestFollowUps(ctx, storedToHistory(stored))
+	if err != nil {
+		s.log.ErrorContext(ctx, "suggest follow-ups", slog.Any("err", err), slog.String("session", sid))
+		writeSuggestions(w, nil)
+		return
+	}
+	writeSuggestions(w, questions)
+}
+
+// verifyTurnstile enforces the once-per-session Cloudflare Turnstile gate. It returns
+// true to proceed; on any rejection it writes the HTTP error response itself and returns
+// false. A nil verifier (tests, local dev without keys) short-circuits to true. On a
+// successful first check it marks the session verified — best-effort, since a persistence
+// error there is logged but must not block the answer.
+func (s *Server) verifyTurnstile(ctx context.Context, w http.ResponseWriter, r *http.Request, sid string) bool {
+	if s.turnstile == nil {
+		return true
+	}
+	verified, err := s.sessions.IsSessionVerified(ctx, sid)
+	if err != nil {
+		s.log.ErrorContext(ctx, "check session verified", slog.Any("err", err), slog.String("session", sid))
+		http.Error(w, "session error", http.StatusInternalServerError)
+		return false
+	}
+	if verified {
+		return true
+	}
+
+	token := strings.TrimSpace(r.FormValue("cf-turnstile-response"))
+	if token == "" {
+		http.Error(w, "verification required", http.StatusForbidden)
+		return false
+	}
+	remoteIP := r.Header.Get("Cf-Connecting-Ip")
+	if remoteIP == "" {
+		remoteIP = r.RemoteAddr
+	}
+	tokenOK, verifyErr := s.turnstile.Verify(ctx, token, remoteIP)
+	outcome := "pass"
+	switch {
+	case verifyErr != nil:
+		outcome = "error"
+	case !tokenOK:
+		outcome = "fail"
+	}
+	metrics.M.TurnstileChecks.Add(ctx, 1, metric.WithAttributes(metrics.AttrString("outcome", outcome)))
+	if verifyErr != nil || !tokenOK {
+		s.log.InfoContext(ctx, "turnstile verification failed",
+			slog.Any("err", verifyErr),
+			slog.String("session", sid),
+		)
+		http.Error(w, "verification failed", http.StatusForbidden)
+		return false
+	}
+	if err := s.sessions.MarkSessionVerified(ctx, sid); err != nil {
+		s.log.ErrorContext(ctx, "mark session verified", slog.Any("err", err), slog.String("session", sid))
+		// Log-and-continue; do not block the answer.
+	}
+	return true
+}
+
 // handleChat accepts a question via POST form, streams the RAG answer as SSE,
 // and persists both turns to the session.
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
@@ -172,46 +302,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Turnstile gate — skipped when no verifier is configured (tests, local dev without keys).
-	if s.turnstile != nil {
-		verified, err := s.sessions.IsSessionVerified(ctx, sid)
-		if err != nil {
-			s.log.ErrorContext(ctx, "check session verified", slog.Any("err", err), slog.String("session", sid))
-			http.Error(w, "session error", http.StatusInternalServerError)
-			return
-		}
-		if !verified {
-			token := strings.TrimSpace(r.FormValue("cf-turnstile-response"))
-			if token == "" {
-				http.Error(w, "verification required", http.StatusForbidden)
-				return
-			}
-			remoteIP := r.Header.Get("Cf-Connecting-Ip")
-			if remoteIP == "" {
-				remoteIP = r.RemoteAddr
-			}
-			tokenOK, verifyErr := s.turnstile.Verify(ctx, token, remoteIP)
-			outcome := "pass"
-			switch {
-			case verifyErr != nil:
-				outcome = "error"
-			case !tokenOK:
-				outcome = "fail"
-			}
-			metrics.M.TurnstileChecks.Add(ctx, 1, metric.WithAttributes(metrics.AttrString("outcome", outcome)))
-			if verifyErr != nil || !tokenOK {
-				s.log.InfoContext(ctx, "turnstile verification failed",
-					slog.Any("err", verifyErr),
-					slog.String("session", sid),
-				)
-				http.Error(w, "verification failed", http.StatusForbidden)
-				return
-			}
-			if err := s.sessions.MarkSessionVerified(ctx, sid); err != nil {
-				s.log.ErrorContext(ctx, "mark session verified", slog.Any("err", err), slog.String("session", sid))
-				// Log-and-continue; do not block the answer.
-			}
-		}
+	// Turnstile gate — writes its own error response and returns false on rejection.
+	if !s.verifyTurnstile(ctx, w, r, sid) {
+		return
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -231,11 +324,25 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.streamAnswer(ctx, w, flusher, sid, question, storedToHistory(stored))
+}
+
+// storedToHistory projects stored messages down to the rag.Message turns the pipeline
+// consumes, dropping the per-message citation/trace metadata the chat path doesn't replay.
+func storedToHistory(stored []StoredMessage) []rag.Message {
 	history := make([]rag.Message, len(stored))
 	for i, sm := range stored {
 		history[i] = sm.Message
 	}
+	return history
+}
 
+// streamAnswer persists the user turn, runs the RAG pipeline while streaming tokens and
+// trace steps over SSE, then persists the assistant turn. It writes all SSE frames
+// (token/trace/error/done) itself. A Model Armor block surfaces as a friendly refusal
+// rather than the generic failure copy. The assistant turn is persisted under a detached
+// context so the DB write survives a browser disconnect.
+func (s *Server) streamAnswer(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, sid, question string, history []rag.Message) {
 	if err := s.sessions.AppendMessage(ctx, sid, rag.Message{Role: rag.RoleUser, Content: question}, nil, nil); err != nil {
 		s.log.ErrorContext(ctx, "append user message", slog.Any("err", err), slog.String("session", sid))
 		_ = sseError(w, flusher, "failed to save message")
@@ -256,9 +363,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return sseToken(w, flusher, tok)
 	}, onTrace)
 	if err != nil {
-		// A Model Armor block is an expected, user-relayable outcome — surface a
-		// friendly refusal rather than the generic failure copy. The gate runs before
-		// any token streams, so a clean error frame is emitted with nothing half-rendered.
+		// The gate runs before any token streams, so a clean error frame is emitted with
+		// nothing half-rendered.
 		if errors.Is(err, rag.ErrPromptBlocked) {
 			_ = sseError(w, flusher, "I can't help with that request.")
 			return
@@ -268,7 +374,6 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Use a detached context so the DB write survives a browser disconnect.
 	persistCtx := context.WithoutCancel(ctx)
 	if err := s.sessions.AppendMessage(
 		persistCtx,

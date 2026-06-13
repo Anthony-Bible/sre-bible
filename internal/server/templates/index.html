@@ -259,13 +259,26 @@
         }
         .grounding-empty { font-style: italic; color: #94a3b8; }
 
-        #suggestions {
+        #suggestions, #followups {
             display: flex;
             flex-direction: column;
             gap: 0.45rem;
             padding: 0.25rem 0;
         }
-        #suggestions button {
+        /* #followups is empty (display:flex collapses to nothing) until cards are
+           injected; the .has-cards class adds the label + fade-in only when populated. */
+        #followups:not(.has-cards) { display: none; }
+        #followups.has-cards { animation: followups-fade-in 0.25s ease-out; }
+        #followups-label {
+            font-size: 0.75rem;
+            color: #94a3b8;
+            padding: 0 0.25rem 0.1rem;
+        }
+        @keyframes followups-fade-in {
+            from { opacity: 0; transform: translateY(4px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+        #suggestions button, #followups button {
             background: white;
             border: 1px solid #dde3ed;
             color: #2563eb;
@@ -278,7 +291,7 @@
             transition: background 0.12s, border-color 0.12s;
             box-shadow: 0 1px 2px rgba(0,0,0,0.04);
         }
-        #suggestions button:hover {
+        #suggestions button:hover, #followups button:hover {
             background: #eff6ff;
             border-color: #93c5fd;
         }
@@ -398,6 +411,8 @@
             <div class="msg-body" id="streaming-content"></div>
         </div>
 
+        <div id="followups" aria-label="Suggested follow-up questions"></div>
+
         <div id="form-wrapper">
             <form id="chat-form" onsubmit="handleSubmit(event)">
                 <textarea id="question-input" name="question"
@@ -446,6 +461,78 @@
             return id;
         }
 
+        // --- Follow-up suggestion cards (inactivity-triggered) --------
+        // After an answer finishes streaming we wait this long with no typing/sending
+        // before asking the backend for 1-2 grounded follow-up questions. Tune here.
+        const FOLLOWUP_DELAY_MS = 4000;
+        let followupTimer = null;
+        let followupAbort = null;
+
+        function clearFollowups() {
+            const zone = document.getElementById('followups');
+            if (zone) { zone.replaceChildren(); zone.classList.remove('has-cards'); }
+        }
+
+        // cancelFollowups stops a pending timer, aborts any in-flight request, and clears
+        // rendered cards. Called the moment the visitor types or sends — so a paused-then-
+        // resumed visitor never sees stale suggestions and we never spend a needless call.
+        function cancelFollowups() {
+            if (followupTimer) { clearTimeout(followupTimer); followupTimer = null; }
+            if (followupAbort) { followupAbort.abort(); followupAbort = null; }
+            clearFollowups();
+        }
+
+        // armFollowupTimer (re)starts the inactivity countdown. Cancels anything pending
+        // first so only the most recent answer is ever followed up on.
+        function armFollowupTimer() {
+            cancelFollowups();
+            followupTimer = setTimeout(loadFollowups, FOLLOWUP_DELAY_MS);
+        }
+
+        async function loadFollowups() {
+            followupTimer = null;
+            // Capture this request's controller locally so a cancel/restart between awaits
+            // (cancelFollowups nulls or replaces followupAbort) can't let a stale response
+            // render cards over what the visitor is now typing.
+            const abort = new AbortController();
+            followupAbort = abort;
+            let resp;
+            try {
+                resp = await fetch('/suggestions', {
+                    method: 'POST',
+                    headers: {
+                        'X-Session-Id': getSessionId(),
+                        'X-Deadpool-Mode': getDeadpoolHeader(),
+                    },
+                    signal: abort.signal,
+                });
+            } catch { return; } // network error or AbortError -> render nothing
+            if (abort.signal.aborted || !resp.ok) return;
+            let data;
+            try { data = await resp.json(); } catch { return; }
+            if (abort.signal.aborted) return;
+            renderFollowups(Array.isArray(data.questions) ? data.questions : []);
+        }
+
+        function renderFollowups(questions) {
+            const zone = document.getElementById('followups');
+            if (!zone) return;
+            zone.replaceChildren();
+            if (questions.length === 0) { zone.classList.remove('has-cards'); return; }
+            const label = document.createElement('div');
+            label.id = 'followups-label';
+            label.textContent = 'You might also ask…';
+            zone.appendChild(label);
+            for (const q of questions) {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.textContent = q;
+                btn.addEventListener('click', () => submitQuestion(q));
+                zone.appendChild(btn);
+            }
+            zone.classList.add('has-cards');
+        }
+
         async function restoreHistory() {
             let resp;
             try {
@@ -475,6 +562,7 @@
 
             const textarea = document.getElementById('question-input');
             textarea.addEventListener('input', autoResize);
+            textarea.addEventListener('input', cancelFollowups);
             textarea.addEventListener('keydown', (e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault();
@@ -734,6 +822,9 @@
             const q = document.getElementById('question-input').value.trim();
             if (!q) return;
 
+            // Sending (incl. clicking a follow-up card) cancels any pending/rendered cards.
+            cancelFollowups();
+
             // Intercept text commands purely client-side
             const lowerQ = q.toLowerCase();
             if (lowerQ === '/deadpool' || lowerQ === 'chimichanga' || lowerQ === 'chimichangas' || lowerQ === 'maximum effort' || lowerQ === 'maximum-effort') {
@@ -838,6 +929,7 @@
                             renderLiveTrace();
                         } else if (event === 'done') {
                             finalizeStreamingBubble(accum, JSON.parse(data).citations, currentTrace);
+                            armFollowupTimer();
                         } else if (event === 'error') {
                             showError(JSON.parse(data).msg);
                         }

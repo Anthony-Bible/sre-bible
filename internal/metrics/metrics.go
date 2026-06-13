@@ -24,9 +24,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	otelprom "go.opentelemetry.io/otel/exporters/prometheus"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/metric/noop"
-	otelprom "go.opentelemetry.io/otel/exporters/prometheus"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	semconv "go.opentelemetry.io/otel/semconv/v1.34.0"
@@ -51,6 +51,9 @@ type Metrics struct {
 	// Tool loop.
 	LLMToolCalls metric.Int64Counter // attrs: tool, outcome
 
+	// Follow-up suggestion cards (inactivity-triggered).
+	FollowUpSuggestions metric.Int64Counter // attr: status ("ok","empty","blocked","unverified","error")
+
 	// Retrieval.
 	RAGRetrievalDuration metric.Float64Histogram
 	RAGChunksRetrieved   metric.Int64Histogram
@@ -66,15 +69,21 @@ type Metrics struct {
 
 // M is the global metrics singleton. It is non-nil at all times: before Init is
 // called it routes through a no-op meter, so call sites never need a nil check.
+//
+//nolint:gochecknoglobals // the package is a deliberate singleton; M is its public face.
 var M *Metrics
 
 // initOnce guards Init against double-registration if a caller invokes it twice.
+//
+//nolint:gochecknoglobals // guards the one-time Init swap of the global M.
 var initOnce sync.Once
 
 // AttrString is a convenience alias for attribute.String to keep call sites terse.
 //
 //	metrics.M.LLMToolCalls.Add(ctx, 1,
 //	    metric.WithAttributes(metrics.AttrString("tool", "list_documents")))
+//
+//nolint:gochecknoglobals // a const-like alias; attribute.String has no const form.
 var AttrString = attribute.String
 
 // init populates M with no-op instruments so the package is usable from t=0.
@@ -140,6 +149,10 @@ func Init(ctx context.Context, serviceName string, log *slog.Logger) (http.Handl
 
 // newMetrics constructs every instrument against the given meter. New metrics
 // belong here — add the field above and the constructor below.
+//
+// instrument count and splitting it would only scatter the registry.
+//
+//nolint:funlen // a flat instrument-registration list; length scales with the
 func newMetrics(meter metric.Meter) (*Metrics, error) {
 	m := &Metrics{meter: meter}
 	var err error
@@ -193,6 +206,13 @@ func newMetrics(meter metric.Meter) (*Metrics, error) {
 	if m.LLMToolCalls, err = meter.Int64Counter(
 		"sre_bible_llm_tool_calls",
 		metric.WithDescription("Agentic tool invocations, labelled by tool and outcome."),
+	); err != nil {
+		return nil, err
+	}
+
+	if m.FollowUpSuggestions, err = meter.Int64Counter(
+		"sre_bible_followup_suggestions",
+		metric.WithDescription("Follow-up suggestion-card generations, labelled by status (ok/empty/blocked/unverified/error)."),
 	); err != nil {
 		return nil, err
 	}

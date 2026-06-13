@@ -3,6 +3,7 @@ package rag
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/metric"
@@ -11,6 +12,57 @@ import (
 )
 
 const defaultK = 8
+
+// MaxFollowUps caps how many follow-up suggestion cards a single SuggestFollowUps
+// call may return.
+const MaxFollowUps = 2
+
+// maxHistoryForFollowUps bounds how many trailing conversation Messages are fed to
+// the follow-up generator. Scoped to the latest exchange only (the most recent user
+// question + assistant answer): suggestions must continue the CURRENT thread, and a
+// weak instruction-follower given more turns drifts back to earlier topics. Also keeps
+// the one-shot call cheap.
+const maxHistoryForFollowUps = 2
+
+// MaxFollowUpTokens caps the completion length of a follow-up suggestion call. A couple
+// of short questions fit comfortably, and a tight cap keeps the inactivity-triggered call
+// cheap. Both FollowUpSuggester implementations (Anthropic + OpenAI-compatible) share it.
+const MaxFollowUpTokens = 256
+
+// CapQuestions trims surrounding whitespace from each follow-up question, drops empty
+// entries, and limits the result to at most maxQuestions. It returns nil when nothing
+// survives, so a degenerate generator response surfaces as "no cards" rather than an
+// empty-string button. Both FollowUpSuggester implementations funnel their parsed output
+// through it, so every provider trims and caps identically.
+func CapQuestions(questions []string, maxQuestions int) []string {
+	if maxQuestions <= 0 {
+		return nil
+	}
+	out := make([]string, 0, len(questions))
+	for _, q := range questions {
+		if q = strings.TrimSpace(q); q == "" {
+			continue
+		}
+		out = append(out, q)
+		if len(out) >= maxQuestions {
+			break
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// FollowUpSuggester does a single, cheap, non-streaming generation that proposes
+// short follow-up questions grounded in the conversation and the document catalog.
+// systemPrompt is the persona-neutral, scope-locked instruction (FollowUpSystemPrompt);
+// messages is the recent history plus a final user turn carrying the catalog;
+// maxQuestions caps the result. Implemented by *llm.Client and the OpenAI-compatible
+// suggester (asserted in cmd/server/main.go).
+type FollowUpSuggester interface {
+	SuggestFollowUps(ctx context.Context, systemPrompt string, messages []Message, maxQuestions int) ([]string, error)
+}
 
 // Pipeline wires together embedding, retrieval, and generation.
 type Pipeline struct {
@@ -22,6 +74,7 @@ type Pipeline struct {
 	matcher    JobMatcher
 	emailerFor EmailerFactory
 	sanitizer  PromptSanitizer
+	suggester  FollowUpSuggester
 	k          int
 	log        *slog.Logger
 	onToolCall func(string)
@@ -40,6 +93,13 @@ func WithOnToolCall(fn func(toolName string)) PipelineOption {
 // s before embedding or generation. A nil sanitizer (the default) skips the gate.
 func WithPromptSanitizer(s PromptSanitizer) PipelineOption {
 	return func(p *Pipeline) { p.sanitizer = s }
+}
+
+// WithFollowUpSuggester returns a PipelineOption that enables SuggestFollowUps by
+// wiring in the one-shot generator. A nil suggester (the default) makes
+// SuggestFollowUps a no-op (returns nil, nil), so cmd/query and tests are unaffected.
+func WithFollowUpSuggester(s FollowUpSuggester) PipelineOption {
+	return func(p *Pipeline) { p.suggester = s }
 }
 
 // NewPipeline creates a Pipeline. Pass k=0 to use defaultK (8).
@@ -85,18 +145,10 @@ func NewPipeline(embedder QueryEmbedder, searcher ChunkSearcher, generator Gener
 func (p *Pipeline) Answer(ctx context.Context, sessionID string, history []Message, question string, onToken func(string) error, onTrace func(TraceStep) error) ([]string, error) {
 	start := time.Now()
 	// Inbound prompt gate: screen for jailbreak / prompt-injection before the model
-	// ever sees the question. A sanitizer error is fail-open (a Model Armor outage
-	// must not take the chat down); a match blocks with a typed sentinel error.
-	if p.sanitizer != nil {
-		blocked, reason, err := p.sanitizer.SanitizePrompt(ctx, question)
-		switch {
-		case err != nil:
-			p.log.ErrorContext(ctx, "model armor check failed; allowing (fail-open)", slog.Any("err", err))
-		case blocked:
-			p.log.WarnContext(ctx, "prompt blocked by model armor", slog.String("reason", reason))
-			metrics.M.LLMResponsesBlocked.Add(ctx, 1, metric.WithAttributes(metrics.AttrString("reason", "model_armor")))
-			return nil, ErrPromptBlocked
-		}
+	// ever sees the question. A match blocks with a typed sentinel error.
+	if p.screenPrompt(ctx, question) {
+		metrics.M.LLMResponsesBlocked.Add(ctx, 1, metric.WithAttributes(metrics.AttrString("reason", "model_armor")))
+		return nil, ErrPromptBlocked
 	}
 
 	queryVec, err := p.embedder.EmbedQuery(ctx, question)
@@ -174,6 +226,107 @@ func (p *Pipeline) Answer(ctx context.Context, sessionID string, history []Messa
 
 	p.log.InfoContext(ctx, "query answered", "chunks", len(chunks), "citations", len(citations))
 	return citations, nil
+}
+
+// screenPrompt runs the inbound Model Armor gate on text. It returns true only when
+// the sanitizer positively flagged the text as a jailbreak / prompt-injection attempt.
+// A nil sanitizer (cmd/query, tests) returns false, and a sanitizer availability error
+// is fail-open — returns false after logging loudly (a Model Armor outage must not take
+// a feature down; see ADR 0011). The caller decides how a true verdict degrades: Answer
+// refuses with ErrPromptBlocked, SuggestFollowUps silently drops the cards.
+func (p *Pipeline) screenPrompt(ctx context.Context, text string) bool {
+	if p.sanitizer == nil {
+		return false
+	}
+	blocked, reason, err := p.sanitizer.SanitizePrompt(ctx, text)
+	switch {
+	case err != nil:
+		p.log.ErrorContext(ctx, "model armor check failed; allowing (fail-open)", slog.Any("err", err))
+		return false
+	case blocked:
+		p.log.WarnContext(ctx, "prompt blocked by model armor", slog.String("reason", reason))
+		return true
+	}
+	return false
+}
+
+// SuggestFollowUps proposes up to MaxFollowUps short follow-up questions a visitor
+// might ask next, grounded in the recent conversation and the document catalog. It is
+// a cheap, one-shot, non-streaming generation used by the inactivity-triggered
+// suggestion cards; it never streams and never invokes RAG tools.
+//
+// It returns nil (no error) when the feature is disabled (no suggester configured) or
+// there is no history to build on. Before the LLM call it screens the user-authored
+// turns through the Model Armor gate: a detected injection drops the cards (no error,
+// status=blocked) so the suggestion path can't be turned into a free general-purpose
+// chatbot; a Model Armor outage is fail-open. The conversation is otherwise treated as
+// untrusted data by the hardened FollowUpSystemPrompt.
+func (p *Pipeline) SuggestFollowUps(ctx context.Context, history []Message) ([]string, error) {
+	if p.suggester == nil || len(history) == 0 {
+		return nil, nil
+	}
+
+	// Bound the history first so the Model Armor gate screens exactly the user-authored
+	// text that will reach the generator — no more, no less. Assistant prose is ours.
+	tail := history[max(0, len(history)-maxHistoryForFollowUps):]
+	if p.screenPrompt(ctx, recentUserText(tail)) {
+		metrics.M.FollowUpSuggestions.Add(ctx, 1, metric.WithAttributes(metrics.AttrString("status", "blocked")))
+		return nil, nil
+	}
+
+	catalog, err := p.buildCatalog(ctx)
+	if err != nil {
+		metrics.M.FollowUpSuggestions.Add(ctx, 1, metric.WithAttributes(metrics.AttrString("status", "error")))
+		return nil, err
+	}
+
+	// messages = trailing history (bounded) + a final user turn carrying the catalog.
+	messages := make([]Message, 0, len(tail)+1)
+	messages = append(messages, tail...)
+	messages = append(messages, Message{Role: RoleUser, Content: BuildFollowUpInstruction(catalog)})
+
+	questions, err := p.suggester.SuggestFollowUps(ctx, FollowUpSystemPrompt, messages, MaxFollowUps)
+	if err != nil {
+		metrics.M.FollowUpSuggestions.Add(ctx, 1, metric.WithAttributes(metrics.AttrString("status", "error")))
+		return nil, err
+	}
+
+	status := "ok"
+	if len(questions) == 0 {
+		status = "empty"
+	}
+	metrics.M.FollowUpSuggestions.Add(ctx, 1, metric.WithAttributes(metrics.AttrString("status", status)))
+	return questions, nil
+}
+
+// buildCatalog renders the document catalog (one DocumentInfo.String() per source,
+// newline-joined) the follow-up generator is grounded against. A nil lister yields an
+// empty catalog — the hardened prompt then proposes nothing rather than going off-source.
+func (p *Pipeline) buildCatalog(ctx context.Context) (string, error) {
+	if p.lister == nil {
+		return "", nil
+	}
+	docs, err := p.lister.ListSources(ctx)
+	if err != nil {
+		return "", err
+	}
+	lines := make([]string, 0, len(docs))
+	for _, d := range docs {
+		lines = append(lines, d.String())
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
+// recentUserText concatenates the content of the user-authored turns in history into a
+// single string for the Model Armor gate. Assistant turns are ours and skipped.
+func recentUserText(history []Message) string {
+	parts := make([]string, 0, len(history))
+	for _, m := range history {
+		if m.Role == RoleUser {
+			parts = append(parts, m.Content)
+		}
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 // buildRetrievalStep turns the retrieved chunks into a TraceStep of kind retrieval:
