@@ -9,6 +9,7 @@ import (
 	"github.com/Anthony-Bible/sre-bible/internal/db"
 	"github.com/Anthony-Bible/sre-bible/internal/gemini"
 	"github.com/Anthony-Bible/sre-bible/internal/llm"
+	applog "github.com/Anthony-Bible/sre-bible/internal/log"
 	"github.com/Anthony-Bible/sre-bible/internal/rag"
 )
 
@@ -22,7 +23,7 @@ var (
 )
 
 func main() {
-	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	log := applog.New(os.Stderr, os.Getenv("LOG_FORMAT"), applog.ParseLevel(os.Getenv("LOG_LEVEL")))
 
 	if err := run(log); err != nil {
 		log.Error("fatal", "err", err)
