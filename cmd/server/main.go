@@ -176,8 +176,9 @@ func run(log *slog.Logger) error {
 	pipeline := rag.NewPipeline(geminiClient, sourceStore, llmClient, sourceStore, sourceStore, matcher, emailerFactory, 0, log, rag.WithPromptSanitizer(armor), rag.WithFollowUpSuggester(suggester), rag.WithJudge(judge))
 
 	suggestLimiter := setupSuggestLimiter(ctx, log)
+	chatLimiter := setupChatLimiter(ctx, log)
 
-	srv, err := server.NewServer(pipeline, sessionStore, pool, tsVerifier, turnstileSiteKey, suggestLimiter, log)
+	srv, err := server.NewServer(pipeline, sessionStore, pool, tsVerifier, turnstileSiteKey, suggestLimiter, chatLimiter, log)
 	if err != nil {
 		return fmt.Errorf("create server: %w", err)
 	}
@@ -341,6 +342,26 @@ func setupSuggestLimiter(ctx context.Context, log *slog.Logger) *ratelimit.Limit
 	intervalMS := envPositiveInt(ctx, "FOLLOWUP_MIN_INTERVAL_MS", 4000, log)
 	interval := time.Duration(intervalMS) * time.Millisecond
 	log.InfoContext(ctx, "suggestion rate limit enabled",
+		slog.Int("per_hour", globalLimit),
+		slog.Duration("min_interval", interval),
+	)
+	return ratelimit.New(interval, globalLimit)
+}
+
+// setupChatLimiter builds the in-process rate limiter for POST /chat — the most
+// expensive endpoint (Model Armor + embedding + pgvector search + streamed
+// Anthropic generation with an agentic tool loop) and a DB-pool-starvation risk.
+// Built from CHAT_RATE_LIMIT_PER_HOUR (global hourly cap, default 500 — lower than
+// suggestions' 1000 since chat is heavier) and CHAT_MIN_INTERVAL_MS (per-session
+// min interval, default 5000 — a human conversation turn takes many seconds). The
+// global cap is a per-replica abuse backstop; the per-session cooldown stays the
+// primary control. Invalid values fall back to the default and warn, mirroring
+// setupSuggestLimiter.
+func setupChatLimiter(ctx context.Context, log *slog.Logger) *ratelimit.Limiter {
+	globalLimit := envPositiveInt(ctx, "CHAT_RATE_LIMIT_PER_HOUR", 500, log)
+	intervalMS := envPositiveInt(ctx, "CHAT_MIN_INTERVAL_MS", 5000, log)
+	interval := time.Duration(intervalMS) * time.Millisecond
+	log.InfoContext(ctx, "chat rate limit enabled",
 		slog.Int("per_hour", globalLimit),
 		slog.Duration("min_interval", interval),
 	)

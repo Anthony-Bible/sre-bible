@@ -318,6 +318,17 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Rate limit: only verified sessions reach here. A throttled request makes no
+	// DB history read / embedding / Model Armor / LLM call — it short-circuits with
+	// 429 before the SSE stream starts, which the client handles like any non-200
+	// from /chat. Per-session cooldown + global hourly backstop, independent of the
+	// /suggestions budget.
+	if s.chatLimiter != nil && !s.chatLimiter.Allow(sid) {
+		metrics.M.LLMResponsesBlocked.Add(ctx, 1, metric.WithAttributes(metrics.AttrString("reason", "rate_limited")))
+		http.Error(w, "rate limited", http.StatusTooManyRequests)
+		return
+	}
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
