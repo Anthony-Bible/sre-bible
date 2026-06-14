@@ -258,18 +258,7 @@ func setupEmailer(ctx context.Context, pool *pgxpool.Pool, log *slog.Logger, out
 		return nil
 	}
 
-	globalLimit := 24
-	if s := strings.TrimSpace(os.Getenv("EMAIL_RATE_LIMIT_PER_HOUR")); s != "" {
-		n, err := strconv.Atoi(s)
-		if err != nil || n <= 0 {
-			log.WarnContext(ctx, "invalid EMAIL_RATE_LIMIT_PER_HOUR, using default",
-				slog.String("value", s),
-				slog.Int("default", globalLimit),
-			)
-		} else {
-			globalLimit = n
-		}
-	}
+	globalLimit := envPositiveInt(ctx, "EMAIL_RATE_LIMIT_PER_HOUR", 24, log)
 
 	sesTx, err := email.NewSESTransport(ctx, email.SESConfig{
 		Region:    awsRegion,

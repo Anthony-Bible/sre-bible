@@ -28,9 +28,8 @@ import (
 type Limiter struct {
 	mu        sync.Mutex
 	keys      map[string]*keyEntry // per-key token buckets, created lazily
-	perKey    time.Duration        // min interval between allowed calls per key
+	perKey    time.Duration        // min interval between allowed calls per key; also the idle-eviction TTL
 	global    *rate.Limiter        // process-wide ceiling (a backstop)
-	idleTTL   time.Duration        // evict keys idle longer than this
 	lastSweep time.Time            // throttles the idle sweep to once per perKey
 }
 
@@ -53,10 +52,9 @@ func New(perKey time.Duration, globalPerHour int) *Limiter {
 		global = rate.NewLimiter(rate.Every(time.Hour/time.Duration(globalPerHour)), globalPerHour)
 	}
 	return &Limiter{
-		keys:    make(map[string]*keyEntry),
-		perKey:  perKey,
-		global:  global,
-		idleTTL: perKey, // once the cooldown elapses a bucket is full again — identical to a fresh one, so it's safe to drop.
+		keys:   make(map[string]*keyEntry),
+		perKey: perKey,
+		global: global,
 	}
 }
 
@@ -81,29 +79,30 @@ func (l *Limiter) Allow(key string) bool {
 	}
 	e.lastSeen = now
 
-	if !e.lim.AllowN(now, 1) {
-		return false
-	}
-	return l.global.AllowN(now, 1)
+	// Short-circuits on the per-key check, so the global budget is debited only
+	// once a key clears its own cooldown.
+	return e.lim.AllowN(now, 1) && l.global.AllowN(now, 1)
 }
 
-// sweep evicts entries idle longer than idleTTL. It is an O(n) scan over the live
-// keys, but n is bounded to keys seen within the last idleTTL window and the scan
-// is amortized to at most once per perKey, so the cost is negligible at this
-// scale. The worst case is a very large key space (e.g. keying by IP under a
-// flood), where holding the mutex for the scan becomes the bottleneck; the escape
-// hatch then is to shard the map or replace it with a time-ordered min-heap so
-// eviction touches only the expired entries (O(k)) rather than all of them. That
-// is over-engineering for throttling by session ID, so we keep the flat scan.
+// sweep evicts keys idle longer than perKey. Once that cooldown elapses a bucket
+// is full again — identical to a fresh one — so dropping it is safe. It is an
+// O(n) scan over the live keys, but n is bounded to keys seen within the last
+// perKey window and the scan is amortized to at most once per perKey, so the cost
+// is negligible at this scale. The worst case is a very large key space (e.g.
+// keying by IP under a flood), where holding the mutex for the scan becomes the
+// bottleneck; the escape hatch then is to shard the map or replace it with a
+// time-ordered min-heap so eviction touches only the expired entries (O(k))
+// rather than all of them. That is over-engineering for throttling by session ID,
+// so we keep the flat scan.
 //
 // Caller must hold l.mu.
 func (l *Limiter) sweep(now time.Time) {
-	if l.idleTTL <= 0 || now.Sub(l.lastSweep) < l.perKey {
+	if l.perKey <= 0 || now.Sub(l.lastSweep) < l.perKey {
 		return
 	}
 	l.lastSweep = now
 	for k, e := range l.keys {
-		if now.Sub(e.lastSeen) > l.idleTTL {
+		if now.Sub(e.lastSeen) > l.perKey {
 			delete(l.keys, k)
 		}
 	}

@@ -74,7 +74,7 @@ func TestLimiter_GlobalCeiling(t *testing.T) {
 }
 
 // TestLimiter_IdleEviction verifies the keys map does not grow without bound:
-// keys untouched past idleTTL are swept, so a burst of one-shot keys does not
+// keys untouched past perKey are swept, so a burst of one-shot keys does not
 // leak entries.
 func TestLimiter_IdleEviction(t *testing.T) {
 	t.Parallel()
@@ -85,7 +85,7 @@ func TestLimiter_IdleEviction(t *testing.T) {
 			l.Allow(fmt.Sprintf("burst-%d", i))
 		}
 
-		// Advance well past idleTTL (== perKey) so every burst key is stale, then
+		// Advance well past perKey so every burst key is stale, then
 		// make one more call to trigger the amortized sweep.
 		time.Sleep(2 * time.Second)
 		l.Allow("trigger")
