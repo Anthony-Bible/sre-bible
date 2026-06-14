@@ -770,7 +770,7 @@ func (c *Client) runEvaluateInterviewAnswer(ctx context.Context, rawInput json.R
 	// judgeFail emits the single tool_call trace step required on every error
 	// exit and formats the user-facing error string. Centralizing this means a
 	// future change to the trace label or outcome value can't drift across the
-	// five validation branches below.
+	// several error-exit branches below.
 	judgeFail := func(format string, args ...any) (string, bool, []string) {
 		emitToolCall(ctx, onTrace, judgeTraceLabel, toolEvaluateInterviewAnswer, "", outcomeError)
 		return fmt.Sprintf(format, args...), true, nil
@@ -818,7 +818,7 @@ func (c *Client) runEvaluateInterviewAnswer(ctx context.Context, rawInput json.R
 	emitToolCall(ctx, onTrace, judgeTraceLabel, toolEvaluateInterviewAnswer, "", outcomeOK)
 	c.log.InfoContext(ctx, "evaluate interview answer",
 		"question_index", qIdx,
-		"answer_chars", len(answer),
+		"answer_bytes", len(answer),
 		"duration_ms", time.Since(start).Milliseconds(),
 	)
 	return string(payload), false, nil
