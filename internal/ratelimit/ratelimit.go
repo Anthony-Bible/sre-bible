@@ -79,9 +79,25 @@ func (l *Limiter) Allow(key string) bool {
 	}
 	e.lastSeen = now
 
-	// Short-circuits on the per-key check, so the global budget is debited only
-	// once a key clears its own cooldown.
-	return e.lim.AllowN(now, 1) && l.global.AllowN(now, 1)
+	// Reserve from the per-key bucket first (so a hammering key can't drain the
+	// shared global budget), then the global bucket, but commit only if BOTH have a
+	// token available now. If either rejects, cancel both reservations so a call
+	// refused by one ceiling does not burn the other's budget — otherwise a
+	// well-behaved key denied solely by a saturated global cap would still be forced
+	// into a full perKey cooldown. Both limiters are only ever touched under l.mu, so
+	// the reserve/cancel pair is race-free.
+	rKey := e.lim.ReserveN(now, 1)
+	if rKey.DelayFrom(now) > 0 {
+		rKey.CancelAt(now)
+		return false
+	}
+	rGlobal := l.global.ReserveN(now, 1)
+	if rGlobal.DelayFrom(now) > 0 {
+		rGlobal.CancelAt(now)
+		rKey.CancelAt(now)
+		return false
+	}
+	return true
 }
 
 // sweep evicts keys idle longer than perKey. Once that cooldown elapses a bucket
