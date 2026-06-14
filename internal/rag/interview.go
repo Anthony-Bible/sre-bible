@@ -25,3 +25,30 @@ type InterviewStateStore interface {
 	ClearInterviewState(ctx context.Context, sessionID string) error
 	IsInterviewActive(ctx context.Context, sessionID string) (bool, error)
 }
+
+// Interview scenario indices. The evaluate_interview_answer tool only accepts
+// question_index values in [0, InterviewNumScenarios).
+const (
+	InterviewScenarioCascadeCacheStampede = 0
+	InterviewScenarioBGPDNS               = 1
+	InterviewScenarioServerlessColdStart  = 2
+	InterviewNumScenarios                 = 3
+)
+
+// InterviewEvaluation is the structured result of grading one interview answer.
+// It is returned by the Judge as the tool result for evaluate_interview_answer.
+// Score is clamped to [0,100]; Passed is derived from Score (>=60).
+type InterviewEvaluation struct {
+	Score                int      `json:"score"`
+	Feedback             string   `json:"feedback"`
+	Passed               bool     `json:"passed"`
+	ConceptsDemonstrated []string `json:"concepts_demonstrated"`
+}
+
+// Judge grades a single interview answer against the rubric for the given
+// scenario index, returning a structured InterviewEvaluation. Implementations
+// typically issue a structured Claude Haiku call. The Judge MUST NOT log or
+// persist the raw user answer.
+type Judge interface {
+	EvaluateAnswer(ctx context.Context, questionIdx int, questionText, userAnswer string) (*InterviewEvaluation, error)
+}

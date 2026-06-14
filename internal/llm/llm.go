@@ -39,13 +39,32 @@ const emailTraceLabel = "Drafted a message to Anthony"
 const matchTraceLabel = "Matched the job description against Anthony's background"
 
 const (
-	toolListDocuments       = "list_documents"
-	toolFetchFullDocument   = "fetch_full_document"
-	toolSendContactEmail    = "send_contact_email"
-	toolMatchJobDescription = "match_job_description"
+	toolListDocuments           = "list_documents"
+	toolFetchFullDocument       = "fetch_full_document"
+	toolSendContactEmail        = "send_contact_email"
+	toolMatchJobDescription     = "match_job_description"
+	toolEvaluateInterviewAnswer = "evaluate_interview_answer"
 	// toolSuggestQuestions is the forced tool SuggestFollowUps uses to coerce the
 	// model into returning a JSON {questions:[...]} object instead of prose.
 	toolSuggestQuestions = "suggest_questions"
+)
+
+// judgeTraceLabel is the generic, PII-free label recorded for every
+// evaluate_interview_answer trace step. The Viewer's raw answer text, the
+// returned feedback, and the numeric score are NEVER recorded — only this
+// label, an empty target, and the outcome.
+const judgeTraceLabel = "Graded an interview answer"
+
+// evaluate_interview_answer field names + bounds.
+const (
+	fieldQuestionIndex   = "question_index"
+	fieldQuestionText    = "question_text"
+	fieldUserAnswer      = "user_answer"
+	maxAnswerChars       = 4000
+	maxQuestionTextChars = 1000
+	maxJudgeFeedback     = 800
+	maxJudgeConcepts     = 8
+	maxJudgeConceptChars = 64
 )
 
 // fieldQuestions is the schema property + JSON key for the suggest_questions tool input.
@@ -457,6 +476,31 @@ func buildToolParams(tools rag.ToolSet) []anthropic.ToolUnionParam {
 		result = append(result, anthropic.ToolUnionParam{OfTool: &t})
 	}
 
+	if tools.Judge != nil {
+		t := anthropic.ToolParam{
+			Name:        toolEvaluateInterviewAnswer,
+			Description: anthropic.String("Grade the candidate's most recent interview answer for the current scenario. Call this exactly once per candidate response, immediately after they answer. Returns {score 0-100, feedback, passed, concepts_demonstrated}. Use the returned score and feedback verbatim in your reply; do not invent your own grade."),
+			InputSchema: anthropic.ToolInputSchemaParam{
+				Properties: map[string]any{
+					fieldQuestionIndex: map[string]any{
+						schemaType:        "integer",
+						schemaDescription: "0-based index of the scenario being graded. 0=Cascading failure / cache stampede; 1=BGP route leak / DNS hijack; 2=Serverless cold start / DB connection pool exhaustion.",
+					},
+					fieldQuestionText: map[string]any{
+						schemaType:        schemaTypeString,
+						schemaDescription: "The exact scenario question the candidate is answering.",
+					},
+					fieldUserAnswer: map[string]any{
+						schemaType:        schemaTypeString,
+						schemaDescription: "The candidate's unstructured response, verbatim.",
+					},
+				},
+				Required: []string{fieldQuestionIndex, fieldQuestionText, fieldUserAnswer},
+			},
+		}
+		result = append(result, anthropic.ToolUnionParam{OfTool: &t})
+	}
+
 	if tools.Emailer != nil {
 		t := anthropic.ToolParam{
 			Name:        toolSendContactEmail,
@@ -501,6 +545,8 @@ func (c *Client) runTool(ctx context.Context, tu anthropic.ToolUseBlock, tools r
 		return c.runFetchFullDocument(ctx, tu.Input, tools, onTrace)
 	case toolMatchJobDescription:
 		return c.runMatchJobDescription(ctx, tu.Input, tools, onTrace)
+	case toolEvaluateInterviewAnswer:
+		return c.runEvaluateInterviewAnswer(ctx, tu.Input, tools, onTrace)
 	case toolSendContactEmail:
 		return c.runSendContactEmail(ctx, tu.Input, tools, onTrace)
 	default:
@@ -712,6 +758,104 @@ func (c *Client) runMatchJobDescription(ctx context.Context, rawInput json.RawMe
 		"duration_ms", time.Since(start).Milliseconds(),
 	)
 	return string(payload), false, sources
+}
+
+// runEvaluateInterviewAnswer dispatches one interview answer to the LLM judge,
+// returning the InterviewEvaluation as JSON for the parent agent loop. Mirrors the
+// match_job_description pattern: validate input, delegate to a typed tools.X
+// implementation, return JSON, and emit exactly one tool_call TraceStep with the
+// generic judgeTraceLabel — never the user's answer, the judge's feedback, or the
+// numeric score (the trace records only the curated label and the outcome).
+func (c *Client) runEvaluateInterviewAnswer(ctx context.Context, rawInput json.RawMessage, tools rag.ToolSet, onTrace func(rag.TraceStep) error) (string, bool, []string) {
+	// judgeFail emits the single tool_call trace step required on every error
+	// exit and formats the user-facing error string. Centralizing this means a
+	// future change to the trace label or outcome value can't drift across the
+	// several error-exit branches below.
+	judgeFail := func(format string, args ...any) (string, bool, []string) {
+		emitToolCall(ctx, onTrace, judgeTraceLabel, toolEvaluateInterviewAnswer, "", outcomeError)
+		return fmt.Sprintf(format, args...), true, nil
+	}
+
+	var input struct {
+		QuestionIndex *int   `json:"question_index"`
+		QuestionText  string `json:"question_text"`
+		UserAnswer    string `json:"user_answer"`
+	}
+	if err := json.Unmarshal(rawInput, &input); err != nil {
+		return judgeFail("invalid evaluate_interview_answer arguments: %v", err)
+	}
+	if input.QuestionIndex == nil {
+		return judgeFail("missing required field %q; must be an integer in [0, %d).", fieldQuestionIndex, rag.InterviewNumScenarios)
+	}
+	qIdx := *input.QuestionIndex
+	if qIdx < 0 || qIdx >= rag.InterviewNumScenarios {
+		return judgeFail("question_index %d is out of range; must be in [0, %d).", qIdx, rag.InterviewNumScenarios)
+	}
+
+	answer := strings.TrimSpace(input.UserAnswer)
+	if answer == "" {
+		return judgeFail("user_answer is empty; ask the candidate to provide their response to the scenario before grading.")
+	}
+	answer = truncateText(answer, maxAnswerChars)
+	qText := truncateText(strings.TrimSpace(input.QuestionText), maxQuestionTextChars)
+
+	start := time.Now()
+	eval, err := tools.Judge.EvaluateAnswer(ctx, qIdx, qText, answer)
+	if err != nil {
+		c.log.ErrorContext(ctx, "evaluate interview answer", slog.Any("err", err))
+		return judgeFail("The grader could not score this answer due to an internal error. Apologize briefly and suggest the candidate restate their answer.")
+	}
+	if eval == nil {
+		return judgeFail("The grader returned no result. Apologize briefly and suggest the candidate restate their answer.")
+	}
+
+	normalized := normalizeEvaluation(eval)
+	payload, err := json.Marshal(normalized)
+	if err != nil {
+		return judgeFail("error encoding evaluation: %v", err)
+	}
+
+	emitToolCall(ctx, onTrace, judgeTraceLabel, toolEvaluateInterviewAnswer, "", outcomeOK)
+	c.log.InfoContext(ctx, "evaluate interview answer",
+		"question_index", qIdx,
+		"answer_bytes", len(answer),
+		"duration_ms", time.Since(start).Milliseconds(),
+	)
+	return string(payload), false, nil
+}
+
+// normalizeEvaluation clamps and trims a Judge result to safe bounds before it is
+// marshalled back to the agent loop. Score is clamped to [0,100]; Passed is derived
+// from Score (>=60) so it cannot drift from the score the model sees; feedback and
+// concept strings are length-capped; concepts beyond maxJudgeConcepts are dropped.
+//
+// Concepts are filtered for empties BEFORE the maxJudgeConcepts cap so a few
+// leading whitespace-only entries can't squeeze valid concepts out of the result.
+func normalizeEvaluation(in *rag.InterviewEvaluation) rag.InterviewEvaluation {
+	score := in.Score
+	if score < 0 {
+		score = 0
+	}
+	if score > 100 {
+		score = 100
+	}
+	concepts := make([]string, 0, len(in.ConceptsDemonstrated))
+	for _, c := range in.ConceptsDemonstrated {
+		c = strings.TrimSpace(c)
+		if c == "" {
+			continue
+		}
+		concepts = append(concepts, truncateText(c, maxJudgeConceptChars))
+		if len(concepts) == maxJudgeConcepts {
+			break
+		}
+	}
+	return rag.InterviewEvaluation{
+		Score:                score,
+		Feedback:             truncateText(strings.TrimSpace(in.Feedback), maxJudgeFeedback),
+		Passed:               score >= 60,
+		ConceptsDemonstrated: concepts,
+	}
 }
 
 // truncateText caps s to at most maxRunes runes, splitting on a rune boundary.

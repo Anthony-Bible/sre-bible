@@ -72,6 +72,7 @@ type Pipeline struct {
 	lister     DocumentLister
 	fetcher    FullTextFetcher
 	matcher    JobMatcher
+	judge      Judge
 	emailerFor EmailerFactory
 	sanitizer  PromptSanitizer
 	suggester  FollowUpSuggester
@@ -100,6 +101,16 @@ func WithPromptSanitizer(s PromptSanitizer) PipelineOption {
 // SuggestFollowUps a no-op (returns nil, nil), so cmd/query and tests are unaffected.
 func WithFollowUpSuggester(s FollowUpSuggester) PipelineOption {
 	return func(p *Pipeline) { p.suggester = s }
+}
+
+// WithJudge returns a PipelineOption that wires an interview Judge into the
+// ToolSet so the model may invoke the evaluate_interview_answer tool. Passing
+// an untyped-nil Judge keeps the tool unadvertised — the same gating pattern
+// matcher and emailer use. (A typed-nil pointer wrapped in the interface is
+// still a non-nil interface value and will advertise the tool, matching the
+// existing convention for the other tool options.)
+func WithJudge(j Judge) PipelineOption {
+	return func(p *Pipeline) { p.judge = j }
 }
 
 // NewPipeline creates a Pipeline. Pass k=0 to use defaultK (8).
@@ -190,7 +201,7 @@ func (p *Pipeline) Answer(ctx context.Context, sessionID string, history []Messa
 	copy(messages, history)
 	messages[len(history)] = currentMsg
 
-	tools := ToolSet{Lister: p.lister, Fetcher: p.fetcher, Matcher: p.matcher}
+	tools := ToolSet{Lister: p.lister, Fetcher: p.fetcher, Matcher: p.matcher, Judge: p.judge}
 	if p.emailerFor != nil {
 		tools.Emailer = p.emailerFor(sessionID)
 	}
