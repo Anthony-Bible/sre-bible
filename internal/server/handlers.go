@@ -74,6 +74,17 @@ const (
 	deadpoolHeaderOff = "false"
 )
 
+// Interview Mode plumbing carried by request headers/params, mirroring the
+// Deadpool toggle. X-Interview-Mode flips the mode on/off, X-Interview-Reset
+// restarts a run from scratch. The frontend maps the /interview and /exit slash
+// commands onto these.
+const (
+	interviewHeader      = "X-Interview-Mode"
+	interviewResetHeader = "X-Interview-Reset"
+	interviewHeaderOn    = "true"
+	interviewHeaderOff   = "false"
+)
+
 // resolvePersonaMode extracts the Deadpool Mode header/query preference, updates the DB if needed, and returns the updated context carrying the PersonaMode.
 func (s *Server) resolvePersonaMode(ctx context.Context, sid string, r *http.Request) context.Context {
 	isDeadpool, err := s.sessions.IsDeadpoolMode(ctx, sid)
@@ -105,6 +116,60 @@ func (s *Server) resolvePersonaMode(ctx context.Context, sid string, r *http.Req
 		return rag.WithPersonaMode(ctx, rag.ModeDeadpool)
 	}
 	return rag.WithPersonaMode(ctx, rag.ModeStandard)
+}
+
+// resolveInterviewMode reads the interview header/query/reset preference, updates the
+// persisted InterviewState as needed, and returns the (possibly flagged) context plus
+// whether interview mode is active for this turn. It mirrors resolvePersonaMode, and
+// must be called after CreateSession so SetInterviewState has a session row to write.
+// DB errors are logged and treated as non-fatal — a state-store hiccup must not 500 the
+// chat turn.
+func (s *Server) resolveInterviewMode(ctx context.Context, sid string, r *http.Request) (context.Context, bool) {
+	active, err := s.sessions.IsInterviewActive(ctx, sid)
+	if err != nil {
+		s.log.ErrorContext(ctx, "check interview active", slog.Any("err", err), slog.String("session", sid))
+	}
+
+	headerVal := r.Header.Get(interviewHeader)
+	queryVal := r.URL.Query().Get("mode")
+	reset := r.Header.Get(interviewResetHeader) == interviewHeaderOn
+
+	switch {
+	case reset:
+		// Restart: wipe any prior progress and seed a fresh run. Stays in interview mode.
+		if err := s.sessions.ClearInterviewState(ctx, sid); err != nil {
+			s.log.ErrorContext(ctx, "clear interview state (reset)", slog.Any("err", err), slog.String("session", sid))
+		}
+		if err := s.sessions.SetInterviewState(ctx, sid, rag.NewInterviewState()); err != nil {
+			s.log.ErrorContext(ctx, "seed interview state (reset)", slog.Any("err", err), slog.String("session", sid))
+		}
+		return rag.WithInterviewMode(ctx, true), true
+
+	case headerVal == interviewHeaderOff:
+		// Explicit /exit: leave interview mode and continue as standard RAG.
+		if active {
+			if err := s.sessions.ClearInterviewState(ctx, sid); err != nil {
+				s.log.ErrorContext(ctx, "clear interview state (exit)", slog.Any("err", err), slog.String("session", sid))
+			}
+		}
+		return ctx, false
+
+	case headerVal == interviewHeaderOn || queryVal == "interview":
+		// First flip-on seeds the scenarios; subsequent turns just stay active.
+		if !active {
+			if err := s.sessions.SetInterviewState(ctx, sid, rag.NewInterviewState()); err != nil {
+				s.log.ErrorContext(ctx, "seed interview state", slog.Any("err", err), slog.String("session", sid))
+			}
+		}
+		return rag.WithInterviewMode(ctx, true), true
+
+	default:
+		// No signal: a mid-run session stays in interview mode across turns.
+		if active {
+			return rag.WithInterviewMode(ctx, true), true
+		}
+		return ctx, false
+	}
 }
 
 // handleMessages returns the message history for a session as JSON.
@@ -329,6 +394,10 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Interview mode: resolved after the session exists and the abuse gates pass, so a
+	// fresh InterviewState is only seeded for verified, non-throttled sessions.
+	ctx, interview := s.resolveInterviewMode(ctx, sid, r)
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
@@ -346,7 +415,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.streamAnswer(ctx, w, flusher, sid, question, storedToHistory(stored))
+	s.streamAnswer(ctx, w, flusher, sid, question, storedToHistory(stored), interview)
 }
 
 // storedToHistory projects stored messages down to the rag.Message turns the pipeline
@@ -364,11 +433,22 @@ func storedToHistory(stored []StoredMessage) []rag.Message {
 // (token/trace/error/done) itself. A Model Armor block surfaces as a friendly refusal
 // rather than the generic failure copy. The assistant turn is persisted under a detached
 // context so the DB write survives a browser disconnect.
-func (s *Server) streamAnswer(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, sid, question string, history []rag.Message) {
+func (s *Server) streamAnswer(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, sid, question string, history []rag.Message, interview bool) {
 	if err := s.sessions.AppendMessage(ctx, sid, rag.Message{Role: rag.RoleUser, Content: question}, nil, nil); err != nil {
 		s.log.ErrorContext(ctx, "append user message", slog.Any("err", err), slog.String("session", sid))
 		_ = sseError(w, flusher, "failed to save message")
 		return
+	}
+
+	// Interview HUD progress: track how many scenarios have been graded so we can emit
+	// an interview_progress event after each grading tool-call and persist the advance.
+	graded, total := 0, rag.InterviewNumScenarios
+	if interview {
+		if state, err := s.sessions.GetInterviewState(ctx, sid); err != nil {
+			s.log.ErrorContext(ctx, "get interview state", slog.Any("err", err), slog.String("session", sid))
+		} else if state != nil {
+			graded, total = state.CurrentQuestionIndex, state.TotalQuestions
+		}
 	}
 
 	var buf strings.Builder
@@ -378,6 +458,17 @@ func (s *Server) streamAnswer(ctx context.Context, w http.ResponseWriter, flushe
 	var trace []rag.TraceStep
 	onTrace := func(step rag.TraceStep) error {
 		trace = append(trace, step)
+		// In interview mode, a successful evaluate_interview_answer tool-call means one
+		// more scenario has been graded: advance the HUD counter and push it live.
+		if interview && step.Kind == rag.TraceKindToolCall && step.ToolCall != nil &&
+			step.ToolCall.Tool == rag.ToolEvaluateInterviewAnswer && step.ToolCall.Outcome == "ok" {
+			if graded < total {
+				graded++
+			}
+			if err := sseInterviewProgress(w, flusher, graded, total); err != nil {
+				return err
+			}
+		}
 		return sseTrace(w, flusher, step)
 	}
 	citations, err := s.pipeline.Answer(ctx, sid, history, question, func(tok string) error {
@@ -405,6 +496,21 @@ func (s *Server) streamAnswer(ctx context.Context, w http.ResponseWriter, flushe
 		trace,
 	); err != nil {
 		s.log.ErrorContext(persistCtx, "append assistant message", slog.Any("err", err), slog.String("session", sid))
+	}
+
+	// Persist the advanced scenario counter so the HUD survives a reload mid-run. Only
+	// write when an answer was actually graded this turn. Detached ctx, like the turn
+	// above, so a browser disconnect doesn't drop the progress.
+	if interview && graded > 0 {
+		if state, err := s.sessions.GetInterviewState(persistCtx, sid); err != nil {
+			s.log.ErrorContext(persistCtx, "get interview state for persist", slog.Any("err", err), slog.String("session", sid))
+		} else if state != nil {
+			state.CurrentQuestionIndex = graded
+			state.Completed = graded >= total
+			if err := s.sessions.SetInterviewState(persistCtx, sid, state); err != nil {
+				s.log.ErrorContext(persistCtx, "persist interview progress", slog.Any("err", err), slog.String("session", sid))
+			}
+		}
 	}
 
 	_ = sseDone(w, flusher, citations)

@@ -39,11 +39,14 @@ const emailTraceLabel = "Drafted a message to Anthony"
 const matchTraceLabel = "Matched the job description against Anthony's background"
 
 const (
-	toolListDocuments           = "list_documents"
-	toolFetchFullDocument       = "fetch_full_document"
-	toolSendContactEmail        = "send_contact_email"
-	toolMatchJobDescription     = "match_job_description"
-	toolEvaluateInterviewAnswer = "evaluate_interview_answer"
+	toolListDocuments       = "list_documents"
+	toolFetchFullDocument   = "fetch_full_document"
+	toolSendContactEmail    = "send_contact_email"
+	toolMatchJobDescription = "match_job_description"
+	// toolEvaluateInterviewAnswer mirrors rag.ToolEvaluateInterviewAnswer — the
+	// single source of truth, so the server can recognise this tool-call in the
+	// trace stream without importing internal/llm.
+	toolEvaluateInterviewAnswer = rag.ToolEvaluateInterviewAnswer
 	// toolSuggestQuestions is the forced tool SuggestFollowUps uses to coerce the
 	// model into returning a JSON {questions:[...]} object instead of prose.
 	toolSuggestQuestions = "suggest_questions"

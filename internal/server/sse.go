@@ -25,6 +25,15 @@ type tracePayload struct {
 	Step rag.TraceStep `json:"step"`
 }
 
+// interviewProgressPayload carries the HUD scenario counter for the
+// "interview_progress" SSE event: Current is the number of scenarios graded so
+// far (1-based), Total the number of scenarios in the run. Deliberately no
+// score/pass field — the rescope (EPIC #26) drops all aggregate outcome.
+type interviewProgressPayload struct {
+	Current int `json:"current"`
+	Total   int `json:"total"`
+}
+
 // writeSSE writes "event: <name>\ndata: <json>\n\n" and flushes.
 func writeSSE(w http.ResponseWriter, f http.Flusher, event string, payload any) error {
 	data, err := json.Marshal(payload)
@@ -50,6 +59,12 @@ func sseDone(w http.ResponseWriter, f http.Flusher, citations []string) error {
 		citations = []string{}
 	}
 	return writeSSE(w, f, "done", donePayload{Citations: citations})
+}
+
+// sseInterviewProgress sends the interview HUD counter after an answer is graded,
+// so the frontend can update its "Scenario N of M" indicator live.
+func sseInterviewProgress(w http.ResponseWriter, f http.Flusher, current, total int) error {
+	return writeSSE(w, f, "interview_progress", interviewProgressPayload{Current: current, Total: total})
 }
 
 // sseError sends an error event to the client.

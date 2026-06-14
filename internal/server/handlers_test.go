@@ -34,6 +34,15 @@ type stubSessions struct {
 	isDeadpoolErr    error
 	setDeadpoolErr   error
 	setDeadpoolCalls []bool
+
+	interviewActive    bool
+	interviewState     *rag.InterviewState
+	isInterviewErr     error
+	getInterviewErr    error
+	setInterviewErr    error
+	clearInterviewErr  error
+	setInterviewCalls  []*rag.InterviewState
+	clearInterviewCall int
 }
 
 type appendedCall struct {
@@ -75,6 +84,32 @@ func (s *stubSessions) IsDeadpoolMode(_ context.Context, _ string) (bool, error)
 	return s.deadpoolMode, s.isDeadpoolErr
 }
 
+func (s *stubSessions) IsInterviewActive(_ context.Context, _ string) (bool, error) {
+	return s.interviewActive, s.isInterviewErr
+}
+
+func (s *stubSessions) GetInterviewState(_ context.Context, _ string) (*rag.InterviewState, error) {
+	return s.interviewState, s.getInterviewErr
+}
+
+func (s *stubSessions) SetInterviewState(_ context.Context, _ string, state *rag.InterviewState) error {
+	s.setInterviewCalls = append(s.setInterviewCalls, state)
+	if s.setInterviewErr == nil {
+		s.interviewState = state
+		s.interviewActive = true
+	}
+	return s.setInterviewErr
+}
+
+func (s *stubSessions) ClearInterviewState(_ context.Context, _ string) error {
+	s.clearInterviewCall++
+	if s.clearInterviewErr == nil {
+		s.interviewState = nil
+		s.interviewActive = false
+	}
+	return s.clearInterviewErr
+}
+
 // stubTurnstile implements TurnstileVerifier with controllable behavior.
 type stubTurnstile struct {
 	ok        bool
@@ -89,15 +124,17 @@ func (st *stubTurnstile) Verify(_ context.Context, _, _ string) (bool, error) {
 
 // stubPipeline implements Answerer with controllable tokens, citations, and trace steps.
 type stubPipeline struct {
-	tokens      []string
-	citations   []string
-	err         error
-	traceSteps  []rag.TraceStep // trace steps emitted via onTrace
-	answerCalls int             // number of times Answer was invoked
+	tokens           []string
+	citations        []string
+	err              error
+	traceSteps       []rag.TraceStep // trace steps emitted via onTrace
+	answerCalls      int             // number of times Answer was invoked
+	gotInterviewMode bool            // InterviewModeFromContext(ctx) seen on the last Answer call
 }
 
-func (p *stubPipeline) Answer(_ context.Context, _ string, _ []rag.Message, _ string, onToken func(string) error, onTrace func(rag.TraceStep) error) ([]string, error) {
+func (p *stubPipeline) Answer(ctx context.Context, _ string, _ []rag.Message, _ string, onToken func(string) error, onTrace func(rag.TraceStep) error) ([]string, error) {
 	p.answerCalls++
+	p.gotInterviewMode = rag.InterviewModeFromContext(ctx)
 	if p.err != nil {
 		return nil, p.err
 	}
@@ -945,5 +982,197 @@ func TestResolvePersonaMode_Optimization(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Interview mode tests (#31)
+// ---------------------------------------------------------------------------
+
+// interviewChatReq builds a POST /chat request for the given session, optionally
+// carrying interview header(s) and a reset flag.
+func interviewChatReq(sid, interviewHeaderVal string, reset bool) *http.Request {
+	form := url.Values{}
+	form.Set("question", "let's go")
+	req := httptest.NewRequest(http.MethodPost, "/chat", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set(sessionHeader, validSessionFixture)
+	if interviewHeaderVal != "" {
+		req.Header.Set(interviewHeader, interviewHeaderVal)
+	}
+	if reset {
+		req.Header.Set(interviewResetHeader, "true")
+	}
+	return req
+}
+
+// TestHandleChat_InterviewMode_FirstFlipOnSeeds verifies X-Interview-Mode: true seeds
+// InterviewState exactly once: on the first activation, but not on a subsequent turn
+// of the same (now-active) session.
+func TestHandleChat_InterviewMode_FirstFlipOnSeeds(t *testing.T) {
+	t.Parallel()
+
+	sessions := &stubSessions{} // interviewActive starts false
+	pipeline := &stubPipeline{tokens: []string{"hi"}}
+	srv := newTestServer(t, pipeline, sessions)
+
+	// First call: not active → seeds.
+	tf1 := newTestFlusher()
+	srv.ServeHTTP(tf1, interviewChatReq(validSessionFixture, "true", false))
+	if len(sessions.setInterviewCalls) != 1 {
+		t.Fatalf("SetInterviewState calls after first flip-on = %d, want 1", len(sessions.setInterviewCalls))
+	}
+	seeded := sessions.setInterviewCalls[0]
+	if seeded == nil || seeded.TotalQuestions != rag.InterviewNumScenarios || len(seeded.Questions) != rag.InterviewNumScenarios {
+		t.Fatalf("seeded state = %+v, want %d scenarios", seeded, rag.InterviewNumScenarios)
+	}
+
+	// Second call: stub now reports active (SetInterviewState set it) → must NOT reseed.
+	tf2 := newTestFlusher()
+	srv.ServeHTTP(tf2, interviewChatReq(validSessionFixture, "true", false))
+	if len(sessions.setInterviewCalls) != 1 {
+		t.Errorf("SetInterviewState calls after second turn = %d, want 1 (no reseed)", len(sessions.setInterviewCalls))
+	}
+}
+
+// TestHandleChat_InterviewMode_PipelineContext verifies the pipeline is invoked with a
+// context where InterviewModeFromContext is true when interview mode is active.
+func TestHandleChat_InterviewMode_PipelineContext(t *testing.T) {
+	t.Parallel()
+
+	sessions := &stubSessions{}
+	pipeline := &stubPipeline{tokens: []string{"hi"}}
+	srv := newTestServer(t, pipeline, sessions)
+
+	tf := newTestFlusher()
+	srv.ServeHTTP(tf, interviewChatReq(validSessionFixture, "true", false))
+
+	if !pipeline.gotInterviewMode {
+		t.Error("pipeline did not receive a context with InterviewModeFromContext == true")
+	}
+}
+
+// TestHandleChat_InterviewMode_Off verifies X-Interview-Mode: false on an active
+// session clears the state and the pipeline runs in standard (non-interview) mode.
+func TestHandleChat_InterviewMode_Off(t *testing.T) {
+	t.Parallel()
+
+	sessions := &stubSessions{interviewActive: true, interviewState: rag.NewInterviewState()}
+	pipeline := &stubPipeline{tokens: []string{"hi"}}
+	srv := newTestServer(t, pipeline, sessions)
+
+	tf := newTestFlusher()
+	srv.ServeHTTP(tf, interviewChatReq(validSessionFixture, "false", false))
+
+	if sessions.clearInterviewCall != 1 {
+		t.Errorf("ClearInterviewState calls = %d, want 1", sessions.clearInterviewCall)
+	}
+	if pipeline.gotInterviewMode {
+		t.Error("pipeline must run in standard mode after /exit; InterviewModeFromContext was true")
+	}
+}
+
+// TestHandleChat_InterviewMode_Reset verifies X-Interview-Reset: true clears and then
+// reseeds a fresh run, leaving interview mode active.
+func TestHandleChat_InterviewMode_Reset(t *testing.T) {
+	t.Parallel()
+
+	// Mid-run state to be wiped.
+	prior := rag.NewInterviewState()
+	prior.CurrentQuestionIndex = 2
+	sessions := &stubSessions{interviewActive: true, interviewState: prior}
+	pipeline := &stubPipeline{tokens: []string{"hi"}}
+	srv := newTestServer(t, pipeline, sessions)
+
+	tf := newTestFlusher()
+	srv.ServeHTTP(tf, interviewChatReq(validSessionFixture, "", true))
+
+	if sessions.clearInterviewCall != 1 {
+		t.Errorf("ClearInterviewState calls = %d, want 1", sessions.clearInterviewCall)
+	}
+	if len(sessions.setInterviewCalls) == 0 {
+		t.Fatal("reset must reseed a fresh InterviewState; SetInterviewState not called")
+	}
+	reseeded := sessions.setInterviewCalls[0]
+	if reseeded.CurrentQuestionIndex != 0 {
+		t.Errorf("reseeded CurrentQuestionIndex = %d, want 0 (fresh)", reseeded.CurrentQuestionIndex)
+	}
+	if !pipeline.gotInterviewMode {
+		t.Error("after reset the session must stay in interview mode")
+	}
+}
+
+// TestHandleChat_InterviewMode_ProgressEvent verifies an interview_progress SSE event
+// with {current,total} is emitted after a graded answer (an ok evaluate_interview_answer
+// tool-call), and that the done payload carries no aggregate score/pass fields.
+func TestHandleChat_InterviewMode_ProgressEvent(t *testing.T) {
+	t.Parallel()
+
+	sessions := &stubSessions{interviewActive: true, interviewState: rag.NewInterviewState()}
+	pipeline := &stubPipeline{
+		traceSteps: []rag.TraceStep{
+			{
+				Kind:     rag.TraceKindToolCall,
+				Label:    "Grading answer…",
+				ToolCall: &rag.ToolCallDetail{Tool: rag.ToolEvaluateInterviewAnswer, Outcome: "ok"},
+			},
+		},
+		tokens:    []string{"graded"},
+		citations: nil,
+	}
+	srv := newTestServer(t, pipeline, sessions)
+
+	tf := newTestFlusher()
+	srv.ServeHTTP(tf, interviewChatReq(validSessionFixture, "", false)) // already active, no header needed
+
+	body := tf.Body.String()
+	if !strings.Contains(body, "event: interview_progress") {
+		t.Fatalf("response missing 'event: interview_progress' frame; got:\n%s", body)
+	}
+	if !strings.Contains(body, `"current":1`) || !strings.Contains(body, `"total":3`) {
+		t.Errorf("interview_progress payload should carry current=1 total=3; got:\n%s", body)
+	}
+
+	// Rescope (EPIC #26): the done payload must not carry aggregate outcome.
+	if strings.Contains(body, "interview_passed") || strings.Contains(body, "interview_score") {
+		t.Errorf("done payload must NOT include interview_passed/interview_score; got:\n%s", body)
+	}
+
+	// Progress must be persisted: CurrentQuestionIndex advanced to 1.
+	last := sessions.setInterviewCalls[len(sessions.setInterviewCalls)-1]
+	if last.CurrentQuestionIndex != 1 {
+		t.Errorf("persisted CurrentQuestionIndex = %d, want 1", last.CurrentQuestionIndex)
+	}
+}
+
+// TestHandleChat_StandardMode_NoProgressEvent verifies a non-interview chat emits no
+// interview_progress frame even if an unrelated tool-call streams.
+func TestHandleChat_StandardMode_NoProgressEvent(t *testing.T) {
+	t.Parallel()
+
+	sessions := &stubSessions{} // not in interview mode
+	pipeline := &stubPipeline{
+		traceSteps: []rag.TraceStep{
+			{
+				Kind:     rag.TraceKindToolCall,
+				Label:    "Reading resume.pdf…",
+				ToolCall: &rag.ToolCallDetail{Tool: "fetch_full_document", Target: "resume.pdf", Outcome: "ok"},
+			},
+		},
+		tokens: []string{"answer"},
+	}
+	srv := newTestServer(t, pipeline, sessions)
+
+	form := url.Values{}
+	form.Set("question", "what is anthony's work history?")
+	req := httptest.NewRequest(http.MethodPost, "/chat", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set(sessionHeader, validSessionFixture)
+
+	tf := newTestFlusher()
+	srv.ServeHTTP(tf, req)
+
+	if strings.Contains(tf.Body.String(), "event: interview_progress") {
+		t.Errorf("standard-mode chat must not emit interview_progress; got:\n%s", tf.Body.String())
 	}
 }
