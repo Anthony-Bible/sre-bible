@@ -9,8 +9,10 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Anthony-Bible/sre-bible/internal/rag"
+	"github.com/Anthony-Bible/sre-bible/internal/ratelimit"
 )
 
 // ---------------------------------------------------------------------------
@@ -87,13 +89,15 @@ func (st *stubTurnstile) Verify(_ context.Context, _, _ string) (bool, error) {
 
 // stubPipeline implements Answerer with controllable tokens, citations, and trace steps.
 type stubPipeline struct {
-	tokens     []string
-	citations  []string
-	err        error
-	traceSteps []rag.TraceStep // trace steps emitted via onTrace
+	tokens      []string
+	citations   []string
+	err         error
+	traceSteps  []rag.TraceStep // trace steps emitted via onTrace
+	answerCalls int             // number of times Answer was invoked
 }
 
 func (p *stubPipeline) Answer(_ context.Context, _ string, _ []rag.Message, _ string, onToken func(string) error, onTrace func(rag.TraceStep) error) ([]string, error) {
+	p.answerCalls++
 	if p.err != nil {
 		return nil, p.err
 	}
@@ -119,7 +123,7 @@ func (p *stubPipeline) Answer(_ context.Context, _ string, _ []rag.Message, _ st
 // newTestServer builds a *Server under test with no Turnstile verifier (skips the check).
 func newTestServer(t *testing.T, pipeline Answerer, sessions SessionRepository) *Server {
 	t.Helper()
-	srv, err := NewServer(pipeline, sessions, nil, nil, "", nil, nil)
+	srv, err := NewServer(pipeline, sessions, nil, nil, "", nil, nil, nil)
 	if err != nil {
 		t.Fatalf("NewServer returned unexpected error: %v", err)
 	}
@@ -129,7 +133,7 @@ func newTestServer(t *testing.T, pipeline Answerer, sessions SessionRepository) 
 // newTestServerWithTurnstile builds a *Server under test with the given Turnstile verifier.
 func newTestServerWithTurnstile(t *testing.T, pipeline Answerer, sessions SessionRepository, ts TurnstileVerifier) *Server {
 	t.Helper()
-	srv, err := NewServer(pipeline, sessions, nil, ts, "test-site-key", nil, nil)
+	srv, err := NewServer(pipeline, sessions, nil, ts, "test-site-key", nil, nil, nil)
 	if err != nil {
 		t.Fatalf("NewServer returned unexpected error: %v", err)
 	}
@@ -783,6 +787,45 @@ func TestHandleChat_Turnstile_ValidToken(t *testing.T) {
 	}
 	if !strings.Contains(tf.Body.String(), "event: token") {
 		t.Errorf("expected SSE token frame in response")
+	}
+}
+
+// TestHandleChat_Throttled verifies that when a chat limiter is wired in, a
+// verified session's first POST /chat succeeds (200) but an immediate second is
+// throttled (429) without invoking the pipeline — the throttled request must
+// short-circuit before the SSE stream and any embedding/LLM/DB work.
+func TestHandleChat_Throttled(t *testing.T) {
+	t.Parallel()
+
+	sessions := &stubSessions{isVerified: true}
+	pipeline := &stubPipeline{tokens: []string{"answer"}, citations: []string{"src.pdf"}}
+	srv := newTestServerWithTurnstile(t, pipeline, sessions, &stubTurnstile{})
+	// A long per-key interval guarantees the second call within the test is throttled.
+	srv.chatLimiter = ratelimit.New(time.Hour, 1000)
+
+	chatReq := func() *http.Request {
+		form := url.Values{}
+		form.Set("question", "what is SRE?")
+		req := httptest.NewRequest(http.MethodPost, "/chat", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set(sessionHeader, "aabbccdd-0000-4000-8000-000000000013")
+		return req
+	}
+
+	tf1 := newTestFlusher()
+	srv.ServeHTTP(tf1, chatReq())
+	if tf1.Code != http.StatusOK {
+		t.Fatalf("first request status = %d, want %d", tf1.Code, http.StatusOK)
+	}
+
+	tf2 := newTestFlusher()
+	srv.ServeHTTP(tf2, chatReq())
+	if tf2.Code != http.StatusTooManyRequests {
+		t.Fatalf("second request status = %d, want %d (throttled)", tf2.Code, http.StatusTooManyRequests)
+	}
+
+	if pipeline.answerCalls != 1 {
+		t.Errorf("Answer called %d time(s), want 1 (throttled request must not reach the pipeline)", pipeline.answerCalls)
 	}
 }
 

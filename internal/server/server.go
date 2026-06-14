@@ -71,6 +71,7 @@ type Server struct {
 	turnstile        TurnstileVerifier
 	turnstileSiteKey string
 	suggestLimiter   *ratelimit.Limiter
+	chatLimiter      *ratelimit.Limiter
 	templates        *template.Template
 	log              *slog.Logger
 	mux              *http.ServeMux
@@ -91,9 +92,10 @@ func defaultSuggestedQuestions() []string {
 
 // NewServer creates a Server, parses embedded templates, and registers routes.
 // turnstile may be nil only in tests; in production main.go always provides one.
-// suggestLimiter throttles POST /suggestions; a nil limiter disables throttling
-// (tests, local dev).
-func NewServer(pipeline Answerer, sessions SessionRepository, pinger Pinger, turnstile TurnstileVerifier, turnstileSiteKey string, suggestLimiter *ratelimit.Limiter, log *slog.Logger) (*Server, error) {
+// suggestLimiter throttles POST /suggestions and chatLimiter throttles POST
+// /chat; the two endpoints have independent budgets. A nil limiter disables
+// throttling for that endpoint (tests, local dev).
+func NewServer(pipeline Answerer, sessions SessionRepository, pinger Pinger, turnstile TurnstileVerifier, turnstileSiteKey string, suggestLimiter *ratelimit.Limiter, chatLimiter *ratelimit.Limiter, log *slog.Logger) (*Server, error) {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -111,6 +113,7 @@ func NewServer(pipeline Answerer, sessions SessionRepository, pinger Pinger, tur
 		turnstile:        turnstile,
 		turnstileSiteKey: turnstileSiteKey,
 		suggestLimiter:   suggestLimiter,
+		chatLimiter:      chatLimiter,
 		templates:        t,
 		log:              log,
 		mux:              mux,

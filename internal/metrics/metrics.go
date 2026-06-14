@@ -44,7 +44,7 @@ type Metrics struct {
 
 	// LLM / RAG outcomes.
 	LLMResponsesServed  metric.Int64Counter     // successful streamed answers
-	LLMResponsesBlocked metric.Int64Counter     // attr: reason ("model_armor", "turnstile")
+	LLMResponsesBlocked metric.Int64Counter     // attr: reason ("model_armor", "turnstile", "rate_limited")
 	LLMErrors           metric.Int64Counter     // attr: stage ("embed","search","stream")
 	LLMDuration         metric.Float64Histogram // wall-clock, attr: outcome
 
