@@ -51,7 +51,7 @@ make build-server
 | `CLAUDE_MODEL` | server | Default `claude-haiku-4-5-20251001` |
 | `LOG_FORMAT` | server | `json` for structured; default text |
 | `EMAIL_FROM`, `EMAIL_TO`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | server | Optional — enables `send_contact_email` tool |
-| `FOLLOWUP_RATE_LIMIT_PER_HOUR` | server | Optional — process-wide hourly cap on `POST /suggestions` (in-process limiter, so per-replica). Default `100`. Invalid/non-positive → default + warn. |
+| `FOLLOWUP_RATE_LIMIT_PER_HOUR` | server | Optional — process-wide hourly cap on `POST /suggestions` (in-process limiter, so per-replica). Abuse backstop set above realistic concurrent load; the per-session cooldown is the primary control. Default `1000`. Invalid/non-positive → default + warn. |
 | `FOLLOWUP_MIN_INTERVAL_MS` | server | Optional — per-session minimum interval between `POST /suggestions` calls, in ms. Default `4000` (matches the client's `FOLLOWUP_DELAY_MS`). Invalid/non-positive → default + warn. |
 | `METRICS_LISTEN_ADDR` | server | Prometheus scrape listener. Default `:9090` (separate from the public chat port). |
 | `OTEL_SERVICE_NAME` | server | Resource attribute attached to every metric. Default `sre-bible`. |

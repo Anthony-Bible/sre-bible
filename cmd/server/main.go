@@ -330,12 +330,14 @@ func setupFollowUpSuggester(llmClient *llm.Client, log *slog.Logger) (rag.Follow
 }
 
 // setupSuggestLimiter builds the in-process rate limiter for POST /suggestions
-// from FOLLOWUP_RATE_LIMIT_PER_HOUR (global hourly cap, default 100) and
+// from FOLLOWUP_RATE_LIMIT_PER_HOUR (global hourly cap, default 1000) and
 // FOLLOWUP_MIN_INTERVAL_MS (per-session min interval, default 4000 — matching the
-// client's FOLLOWUP_DELAY_MS). Invalid values fall back to the default and warn,
+// client's FOLLOWUP_DELAY_MS). The global cap is a per-replica abuse backstop, set
+// well above realistic concurrent legitimate load so the per-session cooldown
+// stays the primary control. Invalid values fall back to the default and warn,
 // mirroring EMAIL_RATE_LIMIT_PER_HOUR.
 func setupSuggestLimiter(ctx context.Context, log *slog.Logger) *ratelimit.Limiter {
-	globalLimit := envPositiveInt(ctx, "FOLLOWUP_RATE_LIMIT_PER_HOUR", 100, log)
+	globalLimit := envPositiveInt(ctx, "FOLLOWUP_RATE_LIMIT_PER_HOUR", 1000, log)
 	intervalMS := envPositiveInt(ctx, "FOLLOWUP_MIN_INTERVAL_MS", 4000, log)
 	interval := time.Duration(intervalMS) * time.Millisecond
 	log.InfoContext(ctx, "suggestion rate limit enabled",
