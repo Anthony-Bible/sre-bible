@@ -7,8 +7,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/Anthony-Bible/sre-bible/internal/rag"
+	"github.com/Anthony-Bible/sre-bible/internal/ratelimit"
 )
 
 // ---------------------------------------------------------------------------
@@ -251,6 +253,40 @@ func TestHandleSuggestions_BadSessionID(t *testing.T) {
 	}
 	if pipeline.suggestCalls != 0 {
 		t.Errorf("SuggestFollowUps called %d time(s), want 0 for a bad session id", pipeline.suggestCalls)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestHandleSuggestions_Throttled
+// ---------------------------------------------------------------------------
+
+// TestHandleSuggestions_Throttled verifies that when a rate limiter is wired in,
+// a verified session's first request succeeds (200) but an immediate second is
+// throttled (429) without invoking the suggester — the throttled request must
+// short-circuit before any LLM/DB-read work.
+func TestHandleSuggestions_Throttled(t *testing.T) {
+	t.Parallel()
+
+	sessions := &stubSessions{isVerified: true, messages: oneTurn()}
+	pipeline := &stubSuggestPipeline{questions: []string{"first call only"}}
+	srv := newTestServerWithTurnstile(t, pipeline, sessions, &stubTurnstile{})
+	// A long per-key interval guarantees the second call within the test is throttled.
+	srv.suggestLimiter = ratelimit.New(time.Hour, 1000)
+
+	rr1 := httptest.NewRecorder()
+	srv.ServeHTTP(rr1, suggestRequest())
+	if rr1.Code != http.StatusOK {
+		t.Fatalf("first request status = %d, want %d", rr1.Code, http.StatusOK)
+	}
+
+	rr2 := httptest.NewRecorder()
+	srv.ServeHTTP(rr2, suggestRequest())
+	if rr2.Code != http.StatusTooManyRequests {
+		t.Fatalf("second request status = %d, want %d (throttled)", rr2.Code, http.StatusTooManyRequests)
+	}
+
+	if pipeline.suggestCalls != 1 {
+		t.Errorf("SuggestFollowUps called %d time(s), want 1 (throttled request must not reach the suggester)", pipeline.suggestCalls)
 	}
 }
 

@@ -40,7 +40,7 @@ func metricsMiddleware(next http.Handler) http.Handler {
 		}
 		base := []attribute.KeyValue{
 			metrics.AttrString("route", route),
-			metrics.AttrString("method", r.Method),
+			metrics.AttrString("method", metrics.NormalizeMethod(r.Method)),
 		}
 		metrics.M.HTTPDuration.Record(ctx, time.Since(start).Seconds(), metric.WithAttributes(base...))
 		metrics.M.HTTPRequests.Add(ctx, 1, metric.WithAttributes(

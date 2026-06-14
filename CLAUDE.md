@@ -51,6 +51,8 @@ make build-server
 | `CLAUDE_MODEL` | server | Default `claude-haiku-4-5-20251001` |
 | `LOG_FORMAT` | server | `json` for structured; default text |
 | `EMAIL_FROM`, `EMAIL_TO`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | server | Optional — enables `send_contact_email` tool |
+| `FOLLOWUP_RATE_LIMIT_PER_HOUR` | server | Optional — process-wide hourly cap on `POST /suggestions` (in-process limiter, so per-replica). Abuse backstop set above realistic concurrent load; the per-session cooldown is the primary control. Default `1000`. Invalid/non-positive → default + warn. |
+| `FOLLOWUP_MIN_INTERVAL_MS` | server | Optional — per-session minimum interval between `POST /suggestions` calls, in ms. Default `4000` (matches the client's `FOLLOWUP_DELAY_MS`). Invalid/non-positive → default + warn. |
 | `METRICS_LISTEN_ADDR` | server | Prometheus scrape listener. Default `:9090` (separate from the public chat port). |
 | `OTEL_SERVICE_NAME` | server | Resource attribute attached to every metric. Default `sre-bible`. |
 | `FOLLOWUP_BASE_URL` | server | Optional — when set, the follow-up suggestion generator (only) switches off Anthropic to an OpenAI-compatible endpoint (OpenRouter, vLLM, Ollama `…/v1`, LM Studio). Unset → Anthropic default. The main chat path is always Anthropic-native. |
@@ -101,7 +103,7 @@ Three tools the model may invoke:
 - `GET /` — renders `templates/index.html` with suggested questions and Turnstile site key.
 - `GET /messages` — returns session message history as JSON; session ID from cookie.
 - `POST /chat` — Cloudflare Turnstile gate (on first request per session), then runs RAG pipeline, streams response as SSE, persists both turns.
-- `POST /suggestions` — returns up to `rag.MaxFollowUps` (2) LLM-generated follow-up questions as `{"questions":[...]}`, grounded in the session's recent history + document catalog. Lazy, inactivity-triggered by the frontend. Requires the session to already be Turnstile-verified (else `403`, no LLM call); every other failure degrades silently to `{"questions":[]}` with `200`. Ephemeral — never persisted. See `pipeline.SuggestFollowUps` and the `rag.FollowUpSuggester` port.
+- `POST /suggestions` — returns up to `rag.MaxFollowUps` (2) LLM-generated follow-up questions as `{"questions":[...]}`, grounded in the session's recent history + document catalog. Lazy, inactivity-triggered by the frontend. Requires the session to already be Turnstile-verified (else `403`, no LLM call). Rate-limited (after the verified gate, before any DB read / LLM call) by an in-process `ratelimit.Limiter`: per-session cooldown (`FOLLOWUP_MIN_INTERVAL_MS`) + global hourly cap (`FOLLOWUP_RATE_LIMIT_PER_HOUR`); a throttled burst gets `429` (distinct from the silent `{"questions":[]}` + `200` degrade used for every non-abuse failure). Ephemeral — never persisted. See `pipeline.SuggestFollowUps` and the `rag.FollowUpSuggester` port.
 - `GET /healthz` / `GET /readyz` — liveness (always 200) / readiness (DB ping).
 
 SSE events: `token` (text delta), `status` (transient tool-use message), `done` (citations JSON), `error`.

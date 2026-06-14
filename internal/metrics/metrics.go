@@ -52,7 +52,7 @@ type Metrics struct {
 	LLMToolCalls metric.Int64Counter // attrs: tool, outcome
 
 	// Follow-up suggestion cards (inactivity-triggered).
-	FollowUpSuggestions metric.Int64Counter // attr: status ("ok","empty","blocked","unverified","error")
+	FollowUpSuggestions metric.Int64Counter // attr: status ("ok","empty","blocked","unverified","throttled","error")
 
 	// Retrieval.
 	RAGRetrievalDuration metric.Float64Histogram
@@ -85,6 +85,23 @@ var initOnce sync.Once
 //
 //nolint:gochecknoglobals // a const-like alias; attribute.String has no const form.
 var AttrString = attribute.String
+
+// NormalizeMethod clamps an HTTP method to a bounded allowlist before it is used
+// as a metric label. Go's HTTP server accepts any RFC 7230 token as a method, so
+// labelling the raw value would let an attacker emit unbounded distinct label
+// values — one new time series each — and grow memory without bound. Anything
+// outside the standard set collapses to "other". Keep cardinality-bounding helpers
+// like this in the metrics package so every call site shares the same guarantee.
+func NormalizeMethod(m string) string {
+	switch m {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+		http.MethodPatch, http.MethodDelete, http.MethodConnect,
+		http.MethodOptions, http.MethodTrace:
+		return m
+	default:
+		return "other"
+	}
+}
 
 // init populates M with no-op instruments so the package is usable from t=0.
 // Init() can later swap meter providers; the M pointer is replaced atomically.
@@ -212,7 +229,7 @@ func newMetrics(meter metric.Meter) (*Metrics, error) {
 
 	if m.FollowUpSuggestions, err = meter.Int64Counter(
 		"sre_bible_followup_suggestions",
-		metric.WithDescription("Follow-up suggestion-card generations, labelled by status (ok/empty/blocked/unverified/error)."),
+		metric.WithDescription("Follow-up suggestion-card generations, labelled by status (ok/empty/blocked/unverified/throttled/error)."),
 	); err != nil {
 		return nil, err
 	}

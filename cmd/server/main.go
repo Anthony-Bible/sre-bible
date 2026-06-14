@@ -24,6 +24,7 @@ import (
 	"github.com/Anthony-Bible/sre-bible/internal/metrics"
 	"github.com/Anthony-Bible/sre-bible/internal/modelarmor"
 	"github.com/Anthony-Bible/sre-bible/internal/rag"
+	"github.com/Anthony-Bible/sre-bible/internal/ratelimit"
 	"github.com/Anthony-Bible/sre-bible/internal/server"
 	"github.com/Anthony-Bible/sre-bible/internal/turnstile"
 )
@@ -174,7 +175,9 @@ func run(log *slog.Logger) error {
 	judge := llm.NewJudge(cfg.anthropicKey, log)
 	pipeline := rag.NewPipeline(geminiClient, sourceStore, llmClient, sourceStore, sourceStore, matcher, emailerFactory, 0, log, rag.WithPromptSanitizer(armor), rag.WithFollowUpSuggester(suggester), rag.WithJudge(judge))
 
-	srv, err := server.NewServer(pipeline, sessionStore, pool, tsVerifier, turnstileSiteKey, log)
+	suggestLimiter := setupSuggestLimiter(ctx, log)
+
+	srv, err := server.NewServer(pipeline, sessionStore, pool, tsVerifier, turnstileSiteKey, suggestLimiter, log)
 	if err != nil {
 		return fmt.Errorf("create server: %w", err)
 	}
@@ -255,18 +258,7 @@ func setupEmailer(ctx context.Context, pool *pgxpool.Pool, log *slog.Logger, out
 		return nil
 	}
 
-	globalLimit := 24
-	if s := strings.TrimSpace(os.Getenv("EMAIL_RATE_LIMIT_PER_HOUR")); s != "" {
-		n, err := strconv.Atoi(s)
-		if err != nil || n <= 0 {
-			log.WarnContext(ctx, "invalid EMAIL_RATE_LIMIT_PER_HOUR, using default",
-				slog.String("value", s),
-				slog.Int("default", globalLimit),
-			)
-		} else {
-			globalLimit = n
-		}
-	}
+	globalLimit := envPositiveInt(ctx, "EMAIL_RATE_LIMIT_PER_HOUR", 24, log)
 
 	sesTx, err := email.NewSESTransport(ctx, email.SESConfig{
 		Region:    awsRegion,
@@ -335,6 +327,43 @@ func setupFollowUpSuggester(llmClient *llm.Client, log *slog.Logger) (rag.Follow
 		slog.String("base_url", base), slog.String("model", model),
 		slog.Int("extra_body_keys", len(extraBody)))
 	return openaicompat.New(base, os.Getenv("FOLLOWUP_API_KEY"), model, extraBody, log), nil
+}
+
+// setupSuggestLimiter builds the in-process rate limiter for POST /suggestions
+// from FOLLOWUP_RATE_LIMIT_PER_HOUR (global hourly cap, default 1000) and
+// FOLLOWUP_MIN_INTERVAL_MS (per-session min interval, default 4000 — matching the
+// client's FOLLOWUP_DELAY_MS). The global cap is a per-replica abuse backstop, set
+// well above realistic concurrent legitimate load so the per-session cooldown
+// stays the primary control. Invalid values fall back to the default and warn,
+// mirroring EMAIL_RATE_LIMIT_PER_HOUR.
+func setupSuggestLimiter(ctx context.Context, log *slog.Logger) *ratelimit.Limiter {
+	globalLimit := envPositiveInt(ctx, "FOLLOWUP_RATE_LIMIT_PER_HOUR", 1000, log)
+	intervalMS := envPositiveInt(ctx, "FOLLOWUP_MIN_INTERVAL_MS", 4000, log)
+	interval := time.Duration(intervalMS) * time.Millisecond
+	log.InfoContext(ctx, "suggestion rate limit enabled",
+		slog.Int("per_hour", globalLimit),
+		slog.Duration("min_interval", interval),
+	)
+	return ratelimit.New(interval, globalLimit)
+}
+
+// envPositiveInt reads key as a positive integer, returning def (and warning)
+// when unset, unparseable, or non-positive.
+func envPositiveInt(ctx context.Context, key string, def int, log *slog.Logger) int {
+	s := strings.TrimSpace(os.Getenv(key))
+	if s == "" {
+		return def
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n <= 0 {
+		log.WarnContext(ctx, "invalid value, using default",
+			slog.String("var", key),
+			slog.String("value", s),
+			slog.Int("default", def),
+		)
+		return def
+	}
+	return n
 }
 
 // setupTurnstile reads the two required Turnstile env vars and returns the site key
