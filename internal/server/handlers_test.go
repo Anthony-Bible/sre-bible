@@ -119,7 +119,7 @@ func (p *stubPipeline) Answer(_ context.Context, _ string, _ []rag.Message, _ st
 // newTestServer builds a *Server under test with no Turnstile verifier (skips the check).
 func newTestServer(t *testing.T, pipeline Answerer, sessions SessionRepository) *Server {
 	t.Helper()
-	srv, err := NewServer(pipeline, sessions, nil, nil, "", nil)
+	srv, err := NewServer(pipeline, sessions, nil, nil, "", nil, nil)
 	if err != nil {
 		t.Fatalf("NewServer returned unexpected error: %v", err)
 	}
@@ -129,7 +129,7 @@ func newTestServer(t *testing.T, pipeline Answerer, sessions SessionRepository) 
 // newTestServerWithTurnstile builds a *Server under test with the given Turnstile verifier.
 func newTestServerWithTurnstile(t *testing.T, pipeline Answerer, sessions SessionRepository, ts TurnstileVerifier) *Server {
 	t.Helper()
-	srv, err := NewServer(pipeline, sessions, nil, ts, "test-site-key", nil)
+	srv, err := NewServer(pipeline, sessions, nil, ts, "test-site-key", nil, nil)
 	if err != nil {
 		t.Fatalf("NewServer returned unexpected error: %v", err)
 	}

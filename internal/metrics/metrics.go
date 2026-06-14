@@ -52,7 +52,7 @@ type Metrics struct {
 	LLMToolCalls metric.Int64Counter // attrs: tool, outcome
 
 	// Follow-up suggestion cards (inactivity-triggered).
-	FollowUpSuggestions metric.Int64Counter // attr: status ("ok","empty","blocked","unverified","error")
+	FollowUpSuggestions metric.Int64Counter // attr: status ("ok","empty","blocked","unverified","throttled","error")
 
 	// Retrieval.
 	RAGRetrievalDuration metric.Float64Histogram
@@ -212,7 +212,7 @@ func newMetrics(meter metric.Meter) (*Metrics, error) {
 
 	if m.FollowUpSuggestions, err = meter.Int64Counter(
 		"sre_bible_followup_suggestions",
-		metric.WithDescription("Follow-up suggestion-card generations, labelled by status (ok/empty/blocked/unverified/error)."),
+		metric.WithDescription("Follow-up suggestion-card generations, labelled by status (ok/empty/blocked/unverified/throttled/error)."),
 	); err != nil {
 		return nil, err
 	}

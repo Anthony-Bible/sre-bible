@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/Anthony-Bible/sre-bible/internal/ratelimit"
 	"github.com/Anthony-Bible/sre-bible/internal/rag"
 )
 
@@ -69,6 +70,7 @@ type Server struct {
 	pinger           Pinger
 	turnstile        TurnstileVerifier
 	turnstileSiteKey string
+	suggestLimiter   *ratelimit.Limiter
 	templates        *template.Template
 	log              *slog.Logger
 	mux              *http.ServeMux
@@ -89,7 +91,9 @@ func defaultSuggestedQuestions() []string {
 
 // NewServer creates a Server, parses embedded templates, and registers routes.
 // turnstile may be nil only in tests; in production main.go always provides one.
-func NewServer(pipeline Answerer, sessions SessionRepository, pinger Pinger, turnstile TurnstileVerifier, turnstileSiteKey string, log *slog.Logger) (*Server, error) {
+// suggestLimiter throttles POST /suggestions; a nil limiter disables throttling
+// (tests, local dev).
+func NewServer(pipeline Answerer, sessions SessionRepository, pinger Pinger, turnstile TurnstileVerifier, turnstileSiteKey string, suggestLimiter *ratelimit.Limiter, log *slog.Logger) (*Server, error) {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -106,6 +110,7 @@ func NewServer(pipeline Answerer, sessions SessionRepository, pinger Pinger, tur
 		pinger:           pinger,
 		turnstile:        turnstile,
 		turnstileSiteKey: turnstileSiteKey,
+		suggestLimiter:   suggestLimiter,
 		templates:        t,
 		log:              log,
 		mux:              mux,

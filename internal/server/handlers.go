@@ -197,6 +197,17 @@ func (s *Server) handleSuggestions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Rate limit: only verified sessions reach here, so unverified abuse is already
+	// rejected (above) without consuming throttle budget. A throttled request makes
+	// no DB read / Model Armor / LLM call — it short-circuits with 429, which the
+	// client can distinguish from the silent {"questions":[]} degrade used for
+	// non-abuse failures.
+	if s.suggestLimiter != nil && !s.suggestLimiter.Allow(sid) {
+		metrics.M.FollowUpSuggestions.Add(ctx, 1, metric.WithAttributes(metrics.AttrString("status", "throttled")))
+		http.Error(w, "rate limited", http.StatusTooManyRequests)
+		return
+	}
+
 	// Feature disabled (pipeline does not implement Suggester): no cards.
 	if s.suggester == nil {
 		writeSuggestions(w, nil)
