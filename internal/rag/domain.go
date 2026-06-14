@@ -11,14 +11,16 @@ import (
 type PersonaMode string
 
 const (
-	ModeStandard PersonaMode = "standard"
-	ModeDeadpool PersonaMode = "deadpool"
+	ModeStandard  PersonaMode = "standard"
+	ModeDeadpool  PersonaMode = "deadpool"
+	ModeInterview PersonaMode = "interview"
 )
 
 type contextKey string
 
 const (
-	personaModeKey contextKey = "persona_mode"
+	personaModeKey   contextKey = "persona_mode"
+	interviewModeKey contextKey = "interview_mode"
 )
 
 // WithPersonaMode returns a new context carrying the specified PersonaMode.
@@ -26,11 +28,32 @@ func WithPersonaMode(ctx context.Context, mode PersonaMode) context.Context {
 	return context.WithValue(ctx, personaModeKey, mode)
 }
 
+// WithInterviewMode returns a new context flagging whether the Session is in
+// interview mode. When on, PersonaModeFromContext resolves to ModeInterview,
+// superseding any directly-set persona (including Deadpool), and Pipeline.Answer
+// skips retrieval. Production sets this per-session; the underlying persona is
+// preserved so flipping the flag off restores the prior voice.
+func WithInterviewMode(ctx context.Context, on bool) context.Context {
+	return context.WithValue(ctx, interviewModeKey, on)
+}
+
+// InterviewModeFromContext reports whether interview mode is on. Defaults to
+// false: only a stored true value returns true.
+func InterviewModeFromContext(ctx context.Context) bool {
+	on, _ := ctx.Value(interviewModeKey).(bool)
+	return on
+}
+
 // PersonaModeFromContext extracts the PersonaMode from the context, defaulting to ModeStandard if not present or invalid.
+// The interview-mode flag wins first: when it is on, the persona is always
+// ModeInterview regardless of any directly-set persona.
 func PersonaModeFromContext(ctx context.Context) PersonaMode {
+	if InterviewModeFromContext(ctx) {
+		return ModeInterview
+	}
 	if v, ok := ctx.Value(personaModeKey).(PersonaMode); ok {
 		switch v {
-		case ModeStandard, ModeDeadpool:
+		case ModeStandard, ModeDeadpool, ModeInterview:
 			return v
 		}
 	}

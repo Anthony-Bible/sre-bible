@@ -79,3 +79,6 @@ One of **Strong**, **Partial**, or **Gap**, assigned by the Resume Agent to each
 
 ### Fit Scorecard
 The structured assistant output produced when a Viewer pastes a Job Description: a GitHub-flavored Markdown table mapping each Requirement to a Match class and cited evidence, followed by an overall fit summary. When any Gap exists, the Resume Agent invites the Viewer to contact the Owner directly (via the `send_contact_email` Tool). The `match_job_description` Tool supplies the grounded evidence; the model performs the decomposition, classification, and synthesis.
+
+### Interview Mode
+An opt-in Session mode in which the Resume Agent sets aside its normal résumé Q&A and runs a fixed sequence of three SRE incident scenarios, grading each answer via the judge Tool (`evaluate_interview_answer`) and reporting that answer's score, demonstrated concepts, and short feedback. It is a live demonstration of the agent stack rather than a qualification gate: there is no aggregate score, no pass/fail outcome, and no scheduling or contact push. The scenarios are scripted into the agent's instructions, not drawn from a Source, so no Retrieval happens while the mode is active.

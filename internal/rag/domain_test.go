@@ -36,3 +36,35 @@ func TestPersonaMode_ContextHelpers(t *testing.T) {
 		t.Errorf("PersonaModeFromContext(invalidCtx) = %q, want %q", got, rag.ModeStandard)
 	}
 }
+
+func TestPersonaModeFromContext_Interview(t *testing.T) {
+	t.Parallel()
+
+	bg := context.Background()
+
+	// Absent flag → false.
+	if rag.InterviewModeFromContext(bg) {
+		t.Error("InterviewModeFromContext(background) = true, want false")
+	}
+
+	// Flag on → persona resolves to ModeInterview.
+	onCtx := rag.WithInterviewMode(bg, true)
+	if !rag.InterviewModeFromContext(onCtx) {
+		t.Error("InterviewModeFromContext(on) = false, want true")
+	}
+	if got := rag.PersonaModeFromContext(onCtx); got != rag.ModeInterview {
+		t.Errorf("PersonaModeFromContext(interview on) = %q, want %q", got, rag.ModeInterview)
+	}
+
+	// Flag on supersedes a directly-set Deadpool persona.
+	dpOn := rag.WithInterviewMode(rag.WithPersonaMode(bg, rag.ModeDeadpool), true)
+	if got := rag.PersonaModeFromContext(dpOn); got != rag.ModeInterview {
+		t.Errorf("interview flag must supersede Deadpool: got %q, want %q", got, rag.ModeInterview)
+	}
+
+	// Flag off → the underlying persona is honoured.
+	dpOff := rag.WithInterviewMode(rag.WithPersonaMode(bg, rag.ModeDeadpool), false)
+	if got := rag.PersonaModeFromContext(dpOff); got != rag.ModeDeadpool {
+		t.Errorf("interview flag off must yield underlying persona: got %q, want %q", got, rag.ModeDeadpool)
+	}
+}
