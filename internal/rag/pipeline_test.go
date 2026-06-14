@@ -51,6 +51,26 @@ func (s stubSearcher) SearchChunks(_ context.Context, _ []float32, _ int) ([]rag
 	return s.chunks, nil
 }
 
+// countingSearcher records how many times SearchChunks was invoked so a test can
+// assert interview mode skips chunk search entirely.
+type countingSearcher struct {
+	chunks []rag.RetrievedChunk
+	calls  int
+}
+
+func (s *countingSearcher) SearchChunks(_ context.Context, _ []float32, _ int) ([]rag.RetrievedChunk, error) {
+	s.calls++
+	return s.chunks, nil
+}
+
+// stubJudge is a no-op Judge that returns a fixed evaluation; used to assert the
+// judge is threaded into the ToolSet in interview mode.
+type stubJudge struct{}
+
+func (stubJudge) EvaluateAnswer(_ context.Context, _ int, _, _ string) (*rag.InterviewEvaluation, error) {
+	return &rag.InterviewEvaluation{Score: 80, Feedback: "solid", Passed: true, ConceptsDemonstrated: []string{"singleflight"}}, nil
+}
+
 // stubGenerator records calls and collects messages.
 type stubGenerator struct {
 	called        bool
@@ -559,6 +579,96 @@ func TestPipeline_EmailerNilWhenNoFactory(t *testing.T) {
 
 	if gen.receivedTools.Emailer != nil {
 		t.Error("ToolSet.Emailer must be nil when no factory is configured")
+	}
+}
+
+func TestPipeline_InterviewModeSkipsRetrieval(t *testing.T) {
+	t.Parallel()
+
+	emb := &countingEmbedder{}
+	searcher := &countingSearcher{chunks: []rag.RetrievedChunk{{Content: "c", SourceName: "s"}}}
+	gen := &stubGenerator{tokens: []string{"answer"}}
+	pipe := rag.NewPipeline(emb, searcher, gen, nil, nil, nil, nil, 0, nil, rag.WithJudge(stubJudge{}))
+
+	ctx := rag.WithInterviewMode(context.Background(), true)
+	var steps []rag.TraceStep
+	_, err := pipe.Answer(ctx, "", nil, "ready", func(string) error { return nil }, func(step rag.TraceStep) error {
+		steps = append(steps, step)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Answer: %v", err)
+	}
+
+	if emb.calls != 0 {
+		t.Errorf("embedder must NOT be called in interview mode: got %d calls", emb.calls)
+	}
+	if searcher.calls != 0 {
+		t.Errorf("searcher must NOT be called in interview mode: got %d calls", searcher.calls)
+	}
+	if !gen.called {
+		t.Error("generator must still be called in interview mode")
+	}
+	if gen.receivedTools.Judge == nil {
+		t.Error("ToolSet.Judge must be threaded through to the generator in interview mode")
+	}
+
+	// The current turn is the raw question — no <context>/Question: wrapper.
+	if len(gen.received) != 1 {
+		t.Fatalf("generator received %d messages, want 1", len(gen.received))
+	}
+	if got := gen.received[0].Content; got != "ready" {
+		t.Errorf("interview-mode message content: got %q, want %q (no context wrapper)", got, "ready")
+	}
+
+	// No retrieval trace step may be emitted in interview mode.
+	for _, s := range steps {
+		if s.Kind == rag.TraceKindRetrieval {
+			t.Errorf("no retrieval trace step may be emitted in interview mode, got %+v", s)
+		}
+	}
+}
+
+func TestPipeline_InterviewModeOff_RetrievalRuns(t *testing.T) {
+	t.Parallel()
+
+	emb := &countingEmbedder{}
+	searcher := &countingSearcher{chunks: []rag.RetrievedChunk{{Content: "c", SourceName: "s"}}}
+	gen := &stubGenerator{tokens: []string{"answer"}}
+	pipe := rag.NewPipeline(emb, searcher, gen, nil, nil, nil, nil, 0, nil, rag.WithJudge(stubJudge{}))
+
+	ctx := rag.WithInterviewMode(context.Background(), false)
+	var steps []rag.TraceStep
+	_, err := pipe.Answer(ctx, "", nil, "q?", func(string) error { return nil }, func(step rag.TraceStep) error {
+		steps = append(steps, step)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Answer: %v", err)
+	}
+
+	if emb.calls != 1 {
+		t.Errorf("embedder must be called once when interview mode is off: got %d calls", emb.calls)
+	}
+	if searcher.calls != 1 {
+		t.Errorf("searcher must be called once when interview mode is off: got %d calls", searcher.calls)
+	}
+
+	var sawRetrieval bool
+	for _, s := range steps {
+		if s.Kind == rag.TraceKindRetrieval {
+			sawRetrieval = true
+		}
+	}
+	if !sawRetrieval {
+		t.Error("a retrieval trace step must be emitted when interview mode is off")
+	}
+
+	if len(gen.received) != 1 {
+		t.Fatalf("generator received %d messages, want 1", len(gen.received))
+	}
+	if !strings.Contains(gen.received[0].Content, "<context>") {
+		t.Errorf("message must carry the <context> block when interview mode is off, got %q", gen.received[0].Content)
 	}
 }
 
