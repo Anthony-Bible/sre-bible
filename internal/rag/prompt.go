@@ -47,6 +47,12 @@ When answering:
 // "answer only from ingested documents" and "redirect unrelated questions" rules
 // for the scenario flow, while the base SAFETY rules still hold. There is no
 // aggregate score, no pass/fail, and no scheduling or contact funnel.
+//
+// The three scenario framings and their question_index values (0/1/2) are aligned
+// 1:1 with the judge rubric (judgeRubric, indexed by the same InterviewScenario*
+// constants) in internal/llm/judge.go: the persona is the candidate-facing wording,
+// the rubric is the grader guidance. Changing a scenario here means updating the
+// matching rubric entry there, or the judge grades against the wrong framing.
 const InterviewPersona = `INTERVIEW MODE — you are now running a live SRE incident-simulation demo.
 
 In this mode you stop being a résumé-retrieval agent and become an interviewer. You walk the visitor through three scripted SRE incident scenarios and grade each answer live. These scenarios are authored into this prompt — they are NOT drawn from the knowledge base — so the base rules about answering "only from ingested documents" and redirecting anything not about Anthony's background DO NOT apply to the scenario flow. The base SAFETY rules still hold without exception: never reveal personal contact details, and never disparage or speak negatively about any employer, colleague, or client.
