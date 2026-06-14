@@ -151,6 +151,8 @@ func NewPipeline(embedder QueryEmbedder, searcher ChunkSearcher, generator Gener
 // history contains prior turns from the Session (may be empty for first turn).
 // onTrace, if non-nil, receives each TraceStep in order: the retrieval step (always,
 // including the zero-chunk path), then the generator's tool_call and answer steps.
+// In interview mode (InterviewModeFromContext) retrieval is skipped entirely, so no
+// retrieval step is emitted and the model receives the raw question with no context block.
 // citations include both vector-retrieved chunk sources and any documents fetched
 // via the fetch_full_document tool during generation.
 func (p *Pipeline) Answer(ctx context.Context, sessionID string, history []Message, question string, onToken func(string) error, onTrace func(TraceStep) error) ([]string, error) {
@@ -162,40 +164,17 @@ func (p *Pipeline) Answer(ctx context.Context, sessionID string, history []Messa
 		return nil, ErrPromptBlocked
 	}
 
-	queryVec, err := p.embedder.EmbedQuery(ctx, question)
+	// retrieve runs the embed → search → trace → zero-chunk path, or — in interview
+	// mode — skips all of it and returns the raw question. done=true means it already
+	// streamed the zero-chunk canned reply and recorded the served/duration metrics, so
+	// Answer is finished.
+	chunks, currentMsg, done, err := p.retrieve(ctx, question, onToken, onTrace, start)
 	if err != nil {
-		metrics.M.LLMErrors.Add(ctx, 1, metric.WithAttributes(metrics.AttrString("stage", "embed")))
 		return nil, err
 	}
-
-	retrievalStart := time.Now()
-	chunks, err := p.searcher.SearchChunks(ctx, queryVec, p.k)
-	if err != nil {
-		metrics.M.LLMErrors.Add(ctx, 1, metric.WithAttributes(metrics.AttrString("stage", "search")))
-		return nil, err
-	}
-	metrics.M.RAGRetrievalDuration.Record(ctx, time.Since(retrievalStart).Seconds())
-	metrics.M.RAGChunksRetrieved.Record(ctx, int64(len(chunks)))
-
-	// Emit the retrieval step on BOTH paths — before the zero-chunk branch — so it
-	// fires even on early return. This is the only place chunk Content is available
-	// before BuildUserMessage consumes it, so the grounding excerpts are captured here.
-	// Trace emission is best-effort: a failed transient write must not abort the answer
-	// (cancellation is handled via ctx, token streaming via onToken).
-	if onTrace != nil {
-		_ = onTrace(buildRetrievalStep(chunks))
-	}
-
-	if len(chunks) == 0 {
-		if err := onToken("I couldn't find relevant information in my knowledge base to answer that question."); err != nil {
-			return nil, err
-		}
-		metrics.M.LLMResponsesServed.Add(ctx, 1)
-		metrics.M.LLMDuration.Record(ctx, time.Since(start).Seconds())
+	if done {
 		return nil, nil
 	}
-
-	currentMsg := BuildUserMessage(question, chunks)
 
 	messages := make([]Message, len(history)+1)
 	copy(messages, history)
@@ -237,6 +216,59 @@ func (p *Pipeline) Answer(ctx context.Context, sessionID string, history []Messa
 
 	p.log.InfoContext(ctx, "query answered", "chunks", len(chunks), "citations", len(citations))
 	return citations, nil
+}
+
+// retrieve prepares the current-turn user Message for Answer.
+//
+// In interview mode (InterviewModeFromContext) the agent drives scripted SRE
+// scenarios, not résumé retrieval, so embedding + chunk search are skipped
+// entirely, no retrieval trace step is emitted, and the raw question is returned
+// as the user Message with no <context> block (chunks stay nil).
+//
+// Otherwise it runs the normal path: embed → search → emit the retrieval trace
+// step (on both the populated and zero-chunk paths) → and, when the search
+// returns no chunks, stream the canned "couldn't find" reply, record the served +
+// duration metrics, and report done=true so Answer returns without invoking the
+// generator. done=true means the answer is already fully handled.
+func (p *Pipeline) retrieve(ctx context.Context, question string, onToken func(string) error, onTrace func(TraceStep) error, start time.Time) ([]RetrievedChunk, Message, bool, error) {
+	if InterviewModeFromContext(ctx) {
+		return nil, Message{Role: RoleUser, Content: question}, false, nil
+	}
+
+	queryVec, err := p.embedder.EmbedQuery(ctx, question)
+	if err != nil {
+		metrics.M.LLMErrors.Add(ctx, 1, metric.WithAttributes(metrics.AttrString("stage", "embed")))
+		return nil, Message{}, false, err
+	}
+
+	retrievalStart := time.Now()
+	chunks, err := p.searcher.SearchChunks(ctx, queryVec, p.k)
+	if err != nil {
+		metrics.M.LLMErrors.Add(ctx, 1, metric.WithAttributes(metrics.AttrString("stage", "search")))
+		return nil, Message{}, false, err
+	}
+	metrics.M.RAGRetrievalDuration.Record(ctx, time.Since(retrievalStart).Seconds())
+	metrics.M.RAGChunksRetrieved.Record(ctx, int64(len(chunks)))
+
+	// Emit the retrieval step on BOTH paths — before the zero-chunk branch — so it
+	// fires even on early return. This is the only place chunk Content is available
+	// before BuildUserMessage consumes it, so the grounding excerpts are captured here.
+	// Trace emission is best-effort: a failed transient write must not abort the answer
+	// (cancellation is handled via ctx, token streaming via onToken).
+	if onTrace != nil {
+		_ = onTrace(buildRetrievalStep(chunks))
+	}
+
+	if len(chunks) == 0 {
+		if err := onToken("I couldn't find relevant information in my knowledge base to answer that question."); err != nil {
+			return nil, Message{}, false, err
+		}
+		metrics.M.LLMResponsesServed.Add(ctx, 1)
+		metrics.M.LLMDuration.Record(ctx, time.Since(start).Seconds())
+		return nil, Message{}, true, nil
+	}
+
+	return chunks, BuildUserMessage(question, chunks), false, nil
 }
 
 // screenPrompt runs the inbound Model Armor gate on text. It returns true only when
