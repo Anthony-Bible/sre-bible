@@ -35,6 +35,35 @@ const (
 	InterviewNumScenarios                 = 3
 )
 
+// ToolEvaluateInterviewAnswer is the name of the per-answer grading tool the
+// interview persona invokes once per scenario. It is the single source of truth
+// for the tool name: internal/llm advertises/dispatches under it, and the server
+// recognises it in the trace stream to advance the HUD scenario counter.
+const ToolEvaluateInterviewAnswer = "evaluate_interview_answer"
+
+// interviewScenarioTitles are the short, HUD-friendly labels for the three fixed
+// scenarios, indexed by the InterviewScenario* constants. They mirror the verbatim
+// candidate-facing scenarios authored in InterviewPersona (prompt.go) — these are
+// titles for state/UI, the persona holds the full wording the model presents.
+var interviewScenarioTitles = []string{
+	InterviewScenarioCascadeCacheStampede: "Cascading Failure / Cache Stampede",
+	InterviewScenarioBGPDNS:               "BGP Route Leak / DNS Hijack",
+	InterviewScenarioServerlessColdStart:  "Serverless Cold Starts & DB Connection Exhaustion",
+}
+
+// NewInterviewState returns the pre-seeded interview state for a freshly activated
+// session: the three fixed scenarios, the counter at the first scenario, and empty
+// per-answer slices. Used by the server on first flip-on (and on restart).
+func NewInterviewState() *InterviewState {
+	titles := make([]string, len(interviewScenarioTitles))
+	copy(titles, interviewScenarioTitles)
+	return &InterviewState{
+		CurrentQuestionIndex: 0,
+		TotalQuestions:       InterviewNumScenarios,
+		Questions:            titles,
+	}
+}
+
 // InterviewEvaluation is the structured result of grading one interview answer.
 // It is returned by the Judge as the tool result for evaluate_interview_answer.
 // Score is clamped to [0,100]; Passed is derived from Score (>=60).
