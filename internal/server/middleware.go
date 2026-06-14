@@ -40,13 +40,29 @@ func metricsMiddleware(next http.Handler) http.Handler {
 		}
 		base := []attribute.KeyValue{
 			metrics.AttrString("route", route),
-			metrics.AttrString("method", r.Method),
+			metrics.AttrString("method", normalizeMethod(r.Method)),
 		}
 		metrics.M.HTTPDuration.Record(ctx, time.Since(start).Seconds(), metric.WithAttributes(base...))
 		metrics.M.HTTPRequests.Add(ctx, 1, metric.WithAttributes(
 			append(base, metrics.AttrString("status", strconv.Itoa(rec.status)))...,
 		))
 	})
+}
+
+// normalizeMethod clamps the request method to a bounded allowlist before it is
+// used as a metric label. Go's HTTP server accepts any RFC 7230 token as a
+// method, so an attacker could otherwise emit unbounded distinct label values
+// (one new Prometheus time series each) and grow memory without bound. Anything
+// outside the standard set collapses to "other".
+func normalizeMethod(m string) string {
+	switch m {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+		http.MethodPatch, http.MethodDelete, http.MethodConnect,
+		http.MethodOptions, http.MethodTrace:
+		return m
+	default:
+		return "other"
+	}
 }
 
 // statusRecorder captures the response status code for the metrics label.
