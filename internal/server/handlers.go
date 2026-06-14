@@ -452,9 +452,17 @@ func (s *Server) streamAnswer(ctx context.Context, w http.ResponseWriter, flushe
 			s.log.ErrorContext(ctx, "get interview state", slog.Any("err", err), slog.String("session", sid))
 		} else if state != nil {
 			interviewState = state
-			graded, total = state.CurrentQuestionIndex, state.TotalQuestions
+			graded = state.CurrentQuestionIndex
+			// Guard against a malformed/legacy row whose TotalQuestions is 0, which would
+			// otherwise zero the cap and stall the HUD at "0 of 0".
+			if state.TotalQuestions > 0 {
+				total = state.TotalQuestions
+			}
 		}
 	}
+	// gradedBefore is the count carried in from prior turns; comparing against it lets us
+	// persist only when this turn actually advanced the counter.
+	gradedBefore := graded
 
 	var buf strings.Builder
 	// Accumulate the trace for persistence AND forward each step live via SSE. The
@@ -504,9 +512,10 @@ func (s *Server) streamAnswer(ctx context.Context, w http.ResponseWriter, flushe
 	}
 
 	// Persist the advanced scenario counter so the HUD survives a reload mid-run, reusing
-	// the state loaded above. Only write when an answer was actually graded this turn.
-	// Detached ctx, like the turn above, so a browser disconnect doesn't drop the progress.
-	if graded > 0 && interviewState != nil {
+	// the state loaded above. Only write when this turn actually graded an answer (the
+	// counter moved past gradedBefore) — a clarifying-question turn must not re-write the
+	// row. Detached ctx, like the turn above, so a browser disconnect doesn't drop it.
+	if graded > gradedBefore && interviewState != nil {
 		interviewState.CurrentQuestionIndex = graded
 		interviewState.Completed = graded >= total
 		if err := s.sessions.SetInterviewState(persistCtx, sid, interviewState); err != nil {

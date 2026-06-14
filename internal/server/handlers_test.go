@@ -1145,6 +1145,38 @@ func TestHandleChat_InterviewMode_ProgressEvent(t *testing.T) {
 	}
 }
 
+// TestHandleChat_InterviewMode_NoGradeNoPersist verifies that a mid-run interview turn
+// that grades nothing (e.g. a clarifying question — no evaluate_interview_answer call)
+// neither emits interview_progress nor re-persists the unchanged scenario counter.
+func TestHandleChat_InterviewMode_NoGradeNoPersist(t *testing.T) {
+	t.Parallel()
+
+	prior := rag.NewInterviewState()
+	prior.CurrentQuestionIndex = 1 // one scenario already graded in an earlier turn
+	sessions := &stubSessions{interviewActive: true, interviewState: prior}
+	pipeline := &stubPipeline{
+		traceSteps: []rag.TraceStep{
+			{
+				Kind:     rag.TraceKindToolCall,
+				Label:    "Reading resume.pdf…",
+				ToolCall: &rag.ToolCallDetail{Tool: "fetch_full_document", Target: "resume.pdf", Outcome: "ok"},
+			},
+		},
+		tokens: []string{"sure, here's a clarification"},
+	}
+	srv := newTestServer(t, pipeline, sessions)
+
+	tf := newTestFlusher()
+	srv.ServeHTTP(tf, interviewChatReq(validSessionFixture, "", false))
+
+	if strings.Contains(tf.Body.String(), "event: interview_progress") {
+		t.Errorf("a turn with no grading must not emit interview_progress; got:\n%s", tf.Body.String())
+	}
+	if len(sessions.setInterviewCalls) != 0 {
+		t.Errorf("a turn with no grading must not re-persist InterviewState; SetInterviewState called %d time(s)", len(sessions.setInterviewCalls))
+	}
+}
+
 // TestHandleChat_StandardMode_NoProgressEvent verifies a non-interview chat emits no
 // interview_progress frame even if an unrelated tool-call streams.
 func TestHandleChat_StandardMode_NoProgressEvent(t *testing.T) {
