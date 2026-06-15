@@ -34,6 +34,7 @@ type stubSessions struct {
 	isDeadpoolErr    error
 	setDeadpoolErr   error
 	setDeadpoolCalls []bool
+	getStateErr      error
 
 	interviewActive    bool
 	interviewState     *rag.InterviewState
@@ -86,6 +87,15 @@ func (s *stubSessions) IsDeadpoolMode(_ context.Context, _ string) (bool, error)
 
 func (s *stubSessions) IsInterviewActive(_ context.Context, _ string) (bool, error) {
 	return s.interviewActive, s.isInterviewErr
+}
+
+func (s *stubSessions) GetSessionState(_ context.Context, _ string) (SessionState, error) {
+	return SessionState{
+		Verified:        s.isVerified,
+		DeadpoolMode:    s.deadpoolMode,
+		InterviewActive: s.interviewActive,
+		InterviewState:  s.interviewState,
+	}, s.getStateErr
 }
 
 func (s *stubSessions) GetInterviewState(_ context.Context, _ string) (*rag.InterviewState, error) {

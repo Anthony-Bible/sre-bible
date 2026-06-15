@@ -87,13 +87,8 @@ const (
 	interviewHeaderOff   = "false"
 )
 
-// resolvePersonaMode extracts the Deadpool Mode header/query preference, updates the DB if needed, and returns the updated context carrying the PersonaMode.
-func (s *Server) resolvePersonaMode(ctx context.Context, sid string, r *http.Request) context.Context {
-	isDeadpool, err := s.sessions.IsDeadpoolMode(ctx, sid)
-	if err != nil {
-		s.log.ErrorContext(ctx, "check deadpool mode", slog.Any("err", err), slog.String("session", sid))
-	}
-
+// resolvePersonaMode extracts the Deadpool Mode header/query preference, updates the DB if needed, and returns the updated context carrying the PersonaMode. isDeadpool is the session's currently-persisted preference, read once by the caller from the session-state snapshot.
+func (s *Server) resolvePersonaMode(ctx context.Context, sid string, r *http.Request, isDeadpool bool) context.Context {
 	headerVal := r.Header.Get("X-Deadpool-Mode")
 	queryVal := r.URL.Query().Get("mode")
 
@@ -126,18 +121,13 @@ func (s *Server) resolvePersonaMode(ctx context.Context, sid string, r *http.Req
 // resolvePersonaMode, and must be called after CreateSession so SetInterviewState has a
 // session row to write. DB errors are logged and treated as non-fatal — a state-store
 // hiccup must not 500 the chat turn.
-func (s *Server) resolveInterviewMode(ctx context.Context, sid string, r *http.Request) context.Context {
+func (s *Server) resolveInterviewMode(ctx context.Context, sid string, r *http.Request, active bool) context.Context {
 	// Kill-switch: when Interview Mode is disabled, never activate it regardless of
 	// any X-Interview-* headers a client might send. Continue as standard RAG. Any
 	// stale persisted state is simply never read into context (and unreachable: the
 	// frontend hides the command, so no new state is ever seeded).
 	if !s.interviewEnabled {
 		return ctx
-	}
-
-	active, err := s.sessions.IsInterviewActive(ctx, sid)
-	if err != nil {
-		s.log.ErrorContext(ctx, "check interview active", slog.Any("err", err), slog.String("session", sid))
 	}
 
 	headerVal := r.Header.Get(interviewHeader)
@@ -182,6 +172,19 @@ func (s *Server) resolveInterviewMode(ctx context.Context, sid string, r *http.R
 	}
 }
 
+// snapshotSessionState reads the per-turn session flags in a single SELECT. On a read
+// error it logs and returns the zero value (all defaults) with ok=false; callers behind
+// the Turnstile gate must treat ok=false as fatal (can't confirm verification → must not
+// bypass the gate), while ungated paths ignore ok and run on the defaults.
+func (s *Server) snapshotSessionState(ctx context.Context, sid string) (SessionState, bool) {
+	state, err := s.sessions.GetSessionState(ctx, sid)
+	if err != nil {
+		s.log.ErrorContext(ctx, "get session state", slog.Any("err", err), slog.String("session", sid))
+		return SessionState{}, false
+	}
+	return state, true
+}
+
 // handleMessages returns the message history for a session as JSON.
 func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	sid, ok := requireSession(w, r)
@@ -189,7 +192,11 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx := s.resolvePersonaMode(r.Context(), sid, r)
+	// One round-trip for the per-session flags, replacing the lone IsDeadpoolMode read.
+	// No turnstile gate here, so a read error degrades to the zero value (non-fatal):
+	// persona resolution simply starts from "not deadpool", as before.
+	state, _ := s.snapshotSessionState(r.Context(), sid)
+	ctx := s.resolvePersonaMode(r.Context(), sid, r, state.DeadpoolMode)
 
 	stored, err := s.sessions.ListMessages(ctx, sid)
 	if err != nil {
@@ -314,15 +321,9 @@ func (s *Server) handleSuggestions(w http.ResponseWriter, r *http.Request) {
 // false. A nil verifier (tests, local dev without keys) short-circuits to true. On a
 // successful first check it marks the session verified — best-effort, since a persistence
 // error there is logged but must not block the answer.
-func (s *Server) verifyTurnstile(ctx context.Context, w http.ResponseWriter, r *http.Request, sid string) bool {
+func (s *Server) verifyTurnstile(ctx context.Context, w http.ResponseWriter, r *http.Request, sid string, verified bool) bool {
 	if s.turnstile == nil {
 		return true
-	}
-	verified, err := s.sessions.IsSessionVerified(ctx, sid)
-	if err != nil {
-		s.log.ErrorContext(ctx, "check session verified", slog.Any("err", err), slog.String("session", sid))
-		http.Error(w, "session error", http.StatusInternalServerError)
-		return false
 	}
 	if verified {
 		return true
@@ -380,7 +381,19 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx := s.resolvePersonaMode(r.Context(), sid, r)
+	// Snapshot the per-session flags in a single SELECT, replacing what used to be three
+	// separate single-column reads of the same row (deadpool / verified / interview-active).
+	// Read before resolvePersonaMode/CreateSession to preserve the existing ordering.
+	state, ok := s.snapshotSessionState(r.Context(), sid)
+	if !ok && s.turnstile != nil {
+		// Read failed and we can't confirm verification → must not bypass the gate.
+		// Mirrors the old verifyTurnstile 500-on-read-error behavior. With no turnstile
+		// (tests/local) the error is non-fatal and we run on the zero-value defaults.
+		http.Error(w, "session error", http.StatusInternalServerError)
+		return
+	}
+
+	ctx := s.resolvePersonaMode(r.Context(), sid, r, state.DeadpoolMode)
 
 	if err := s.sessions.CreateSession(ctx, sid); err != nil {
 		s.log.ErrorContext(ctx, "create session", slog.Any("err", err), slog.String("session", sid))
@@ -389,7 +402,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Turnstile gate — writes its own error response and returns false on rejection.
-	if !s.verifyTurnstile(ctx, w, r, sid) {
+	if !s.verifyTurnstile(ctx, w, r, sid, state.Verified) {
 		return
 	}
 
@@ -407,7 +420,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// Interview mode: resolved after the session exists and the abuse gates pass, so a
 	// fresh InterviewState is only seeded for verified, non-throttled sessions. The
 	// resulting mode rides the context; streamAnswer reads it back off ctx.
-	ctx = s.resolveInterviewMode(ctx, sid, r)
+	ctx = s.resolveInterviewMode(ctx, sid, r, state.InterviewActive)
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
