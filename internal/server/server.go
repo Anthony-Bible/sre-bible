@@ -8,8 +8,8 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/Anthony-Bible/sre-bible/internal/ratelimit"
 	"github.com/Anthony-Bible/sre-bible/internal/rag"
+	"github.com/Anthony-Bible/sre-bible/internal/ratelimit"
 )
 
 //go:embed templates
@@ -43,6 +43,17 @@ type StoredMessage struct {
 	Trace     []rag.TraceStep
 }
 
+// SessionState is a one-shot snapshot of the per-session flags read on every chat turn,
+// fetched in a single SELECT to avoid three separate single-column reads of the same row.
+// A missing session yields the zero value (all false / nil), mirroring the per-method
+// "unknown session → default" contract of IsDeadpoolMode / IsSessionVerified / IsInterviewActive.
+type SessionState struct {
+	Verified        bool
+	DeadpoolMode    bool
+	InterviewActive bool
+	InterviewState  *rag.InterviewState
+}
+
 // SessionRepository is the persistence port for anonymous chat sessions.
 // Defined here (consumed here); implemented by *db.SessionStore.
 // Compile-time assertion lives in cmd/server/main.go to avoid import cycles.
@@ -58,6 +69,7 @@ type SessionRepository interface {
 	SetInterviewState(ctx context.Context, sessionID string, state *rag.InterviewState) error
 	ClearInterviewState(ctx context.Context, sessionID string) error
 	IsInterviewActive(ctx context.Context, sessionID string) (bool, error)
+	GetSessionState(ctx context.Context, sessionID string) (SessionState, error)
 }
 
 // TurnstileVerifier is the port for verifying Cloudflare Turnstile tokens.

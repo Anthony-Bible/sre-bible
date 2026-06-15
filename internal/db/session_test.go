@@ -711,3 +711,81 @@ func TestClearInterviewState_MissingSession(t *testing.T) {
 		t.Fatal("ClearInterviewState for missing session: got nil error, want not-found error")
 	}
 }
+
+// --- Contract: GetSessionState batched read ---
+
+// TestGetSessionState_RoundTrip verifies that GetSessionState returns all four
+// per-session flags from a single read: turnstile_verified, deadpool_mode,
+// interview_active, and the unmarshalled interview_state. It must reflect the
+// same values the individual IsSessionVerified / IsDeadpoolMode / IsInterviewActive
+// / GetInterviewState reads would return.
+func TestGetSessionState_RoundTrip(t *testing.T) {
+	pool, cleanup := testSessionDB(t)
+	defer cleanup()
+
+	store := db.NewSessionStore(pool, slog.Default())
+	id := sessionID("100000000008")
+	ctx := context.Background()
+
+	if err := store.CreateSession(ctx, id); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := store.MarkSessionVerified(ctx, id); err != nil {
+		t.Fatalf("MarkSessionVerified: %v", err)
+	}
+	if err := store.SetDeadpoolMode(ctx, id, true); err != nil {
+		t.Fatalf("SetDeadpoolMode: %v", err)
+	}
+	wantState := &rag.InterviewState{
+		CurrentQuestionIndex: 1,
+		TotalQuestions:       3,
+		Questions:            []string{"q1", "q2", "q3"},
+		Answers:              []string{"a1"},
+		Scores:               []int{8},
+		Feedbacks:            []string{"solid"},
+		TotalScore:           8,
+	}
+	// SetInterviewState also flips interview_active = true.
+	if err := store.SetInterviewState(ctx, id, wantState); err != nil {
+		t.Fatalf("SetInterviewState: %v", err)
+	}
+
+	got, err := store.GetSessionState(ctx, id)
+	if err != nil {
+		t.Fatalf("GetSessionState: %v", err)
+	}
+	if !got.Verified {
+		t.Error("Verified: got false, want true")
+	}
+	if !got.DeadpoolMode {
+		t.Error("DeadpoolMode: got false, want true")
+	}
+	if !got.InterviewActive {
+		t.Error("InterviewActive: got false, want true")
+	}
+	if got.InterviewState == nil {
+		t.Fatal("InterviewState: got nil, want populated state")
+	}
+	if !reflect.DeepEqual(got.InterviewState, wantState) {
+		t.Errorf("InterviewState round-trip mismatch:\n got: %+v\nwant: %+v", got.InterviewState, wantState)
+	}
+}
+
+// TestGetSessionState_MissingSession verifies that GetSessionState returns the
+// zero value (all false / nil) and no error for a session row that does not
+// exist, mirroring the per-method "unknown session → default" contract.
+func TestGetSessionState_MissingSession(t *testing.T) {
+	pool, cleanup := testSessionDB(t)
+	defer cleanup()
+
+	store := db.NewSessionStore(pool, slog.Default())
+	ctx := context.Background()
+
+	got, err := store.GetSessionState(ctx, sessionID("100000000009"))
+	if err != nil {
+		t.Fatalf("GetSessionState for missing session: %v", err)
+	}
+	if got.Verified || got.DeadpoolMode || got.InterviewActive || got.InterviewState != nil {
+		t.Errorf("GetSessionState for missing session: got %+v, want zero value", got)
+	}
+}

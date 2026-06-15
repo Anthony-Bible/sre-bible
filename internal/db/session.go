@@ -130,6 +130,36 @@ func (s *SessionStore) IsSessionVerified(ctx context.Context, sessionID string) 
 	return verified, nil
 }
 
+// GetSessionState returns a one-shot snapshot of the per-session flags read on every
+// chat turn (verified / deadpool / interview-active + interview state) in a single
+// SELECT, replacing three separate single-column reads of the same row. A missing
+// session yields the zero value (all false / nil), mirroring the per-method
+// "unknown session → default" contract of IsDeadpoolMode / IsSessionVerified /
+// IsInterviewActive / GetInterviewState.
+func (s *SessionStore) GetSessionState(ctx context.Context, sessionID string) (server.SessionState, error) {
+	var st server.SessionState
+	var raw []byte
+	err := s.pool.QueryRow(ctx,
+		`SELECT turnstile_verified, deadpool_mode, interview_active, interview_state
+		 FROM sessions WHERE id = $1`,
+		sessionID,
+	).Scan(&st.Verified, &st.DeadpoolMode, &st.InterviewActive, &raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return server.SessionState{}, nil
+	}
+	if err != nil {
+		return server.SessionState{}, fmt.Errorf("get session state: %w", err)
+	}
+	if len(raw) > 0 {
+		var is rag.InterviewState
+		if err := json.Unmarshal(raw, &is); err != nil {
+			return server.SessionState{}, fmt.Errorf("unmarshal interview state: %w", err)
+		}
+		st.InterviewState = &is
+	}
+	return st, nil
+}
+
 // MarkSessionVerified sets turnstile_verified = true for the given session.
 func (s *SessionStore) MarkSessionVerified(ctx context.Context, sessionID string) error {
 	_, err := s.pool.Exec(ctx,
