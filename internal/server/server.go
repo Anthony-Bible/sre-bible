@@ -86,6 +86,7 @@ type Server struct {
 	pinger           Pinger
 	turnstile        TurnstileVerifier
 	turnstileSiteKey string
+	interviewEnabled bool
 	suggestLimiter   *ratelimit.Limiter
 	chatLimiter      *ratelimit.Limiter
 	templates        *template.Template
@@ -110,8 +111,10 @@ func defaultSuggestedQuestions() []string {
 // turnstile may be nil only in tests; in production main.go always provides one.
 // suggestLimiter throttles POST /suggestions and chatLimiter throttles POST
 // /chat; the two endpoints have independent budgets. A nil limiter disables
-// throttling for that endpoint (tests, local dev).
-func NewServer(pipeline Answerer, sessions SessionRepository, pinger Pinger, turnstile TurnstileVerifier, turnstileSiteKey string, suggestLimiter *ratelimit.Limiter, chatLimiter *ratelimit.Limiter, log *slog.Logger) (*Server, error) {
+// throttling for that endpoint (tests, local dev). interviewEnabled gates
+// Interview Mode: when false the backend never activates it and the frontend
+// hides the /interview command and HUD.
+func NewServer(pipeline Answerer, sessions SessionRepository, pinger Pinger, turnstile TurnstileVerifier, turnstileSiteKey string, suggestLimiter *ratelimit.Limiter, chatLimiter *ratelimit.Limiter, interviewEnabled bool, log *slog.Logger) (*Server, error) {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -128,6 +131,7 @@ func NewServer(pipeline Answerer, sessions SessionRepository, pinger Pinger, tur
 		pinger:           pinger,
 		turnstile:        turnstile,
 		turnstileSiteKey: turnstileSiteKey,
+		interviewEnabled: interviewEnabled,
 		suggestLimiter:   suggestLimiter,
 		chatLimiter:      chatLimiter,
 		templates:        t,

@@ -59,13 +59,14 @@ func main() {
 // serverConfig holds the env-derived configuration for the HTTP server. Required
 // values are validated in loadServerConfig; optional values carry their defaults.
 type serverConfig struct {
-	dbURL        string
-	geminiKey    string
-	anthropicKey string
-	model        string
-	addr         string
-	metricsAddr  string
-	serviceName  string
+	dbURL            string
+	geminiKey        string
+	anthropicKey     string
+	model            string
+	addr             string
+	metricsAddr      string
+	serviceName      string
+	interviewEnabled bool
 }
 
 // loadServerConfig reads and validates configuration from the environment. The three
@@ -173,7 +174,11 @@ func run(log *slog.Logger) error {
 	suggestLimiter := setupSuggestLimiter(ctx, log)
 	chatLimiter := setupChatLimiter(ctx, log)
 
-	srv, err := server.NewServer(pipeline, sessionStore, pool, tsVerifier, turnstileSiteKey, suggestLimiter, chatLimiter, log)
+	// Interview Mode is off unless explicitly enabled (opt-in kill-switch). When
+	// disabled, the backend refuses to activate it and the frontend hides the command.
+	cfg.interviewEnabled = envBool(ctx, "INTERVIEW_MODE_ENABLED", false, log)
+
+	srv, err := server.NewServer(pipeline, sessionStore, pool, tsVerifier, turnstileSiteKey, suggestLimiter, chatLimiter, cfg.interviewEnabled, log)
 	if err != nil {
 		return fmt.Errorf("create server: %w", err)
 	}
@@ -361,6 +366,25 @@ func setupChatLimiter(ctx context.Context, log *slog.Logger) *ratelimit.Limiter 
 		slog.Duration("min_interval", interval),
 	)
 	return ratelimit.New(interval, globalLimit)
+}
+
+// envBool reads key as a boolean (strconv.ParseBool syntax: 1/t/true, 0/f/false),
+// returning def when unset and def + a warning when unparseable.
+func envBool(ctx context.Context, key string, def bool, log *slog.Logger) bool {
+	s := strings.TrimSpace(os.Getenv(key))
+	if s == "" {
+		return def
+	}
+	v, err := strconv.ParseBool(s)
+	if err != nil {
+		log.WarnContext(ctx, "invalid value, using default",
+			slog.String("var", key),
+			slog.String("value", s),
+			slog.Bool("default", def),
+		)
+		return def
+	}
+	return v
 }
 
 // envPositiveInt reads key as a positive integer, returning def (and warning)

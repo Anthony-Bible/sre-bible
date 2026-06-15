@@ -49,6 +49,7 @@ make build-server
 | `MODEL_ARMOR_TEMPLATE` | server | Model Armor prompt-injection gate template resource name (fatal if missing). Auth via ADC, not an API key. |
 | `LISTEN_ADDR` | server | Default `:8080` |
 | `CLAUDE_MODEL` | server | Default `claude-haiku-4-5-20251001` |
+| `INTERVIEW_MODE_ENABLED` | server | Optional kill-switch for Interview Mode (the `/interview` simulator). `strconv.ParseBool` syntax (`true`/`1`/`false`/`0`). **Default `false` (disabled)** — opt in with `true`. When off, `resolveInterviewMode` never activates the mode regardless of `X-Interview-*` headers, and the frontend hides the `/interview` command + HUD. Invalid value → default + warn. |
 | `LOG_FORMAT` | server | `json` for structured; default text |
 | `EMAIL_FROM`, `EMAIL_TO`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | server | Optional — enables `send_contact_email` tool |
 | `FOLLOWUP_RATE_LIMIT_PER_HOUR` | server | Optional — process-wide hourly cap on `POST /suggestions` (in-process limiter, so per-replica). Abuse backstop set above realistic concurrent load; the per-session cooldown is the primary control. Default `1000`. Invalid/non-positive → default + warn. |

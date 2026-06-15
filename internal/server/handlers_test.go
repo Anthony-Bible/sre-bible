@@ -168,9 +168,22 @@ func (p *stubPipeline) Answer(ctx context.Context, _ string, _ []rag.Message, _ 
 // ---------------------------------------------------------------------------
 
 // newTestServer builds a *Server under test with no Turnstile verifier (skips the check).
+// Interview Mode is enabled so the interview tests exercise the live behavior; the
+// disabled kill-switch is covered separately by newTestServerInterviewDisabled.
 func newTestServer(t *testing.T, pipeline Answerer, sessions SessionRepository) *Server {
 	t.Helper()
-	srv, err := NewServer(pipeline, sessions, nil, nil, "", nil, nil, nil)
+	srv, err := NewServer(pipeline, sessions, nil, nil, "", nil, nil, true, nil)
+	if err != nil {
+		t.Fatalf("NewServer returned unexpected error: %v", err)
+	}
+	return srv
+}
+
+// newTestServerInterviewDisabled builds a *Server with Interview Mode turned off,
+// to verify the backend kill-switch.
+func newTestServerInterviewDisabled(t *testing.T, pipeline Answerer, sessions SessionRepository) *Server {
+	t.Helper()
+	srv, err := NewServer(pipeline, sessions, nil, nil, "", nil, nil, false, nil)
 	if err != nil {
 		t.Fatalf("NewServer returned unexpected error: %v", err)
 	}
@@ -180,7 +193,7 @@ func newTestServer(t *testing.T, pipeline Answerer, sessions SessionRepository) 
 // newTestServerWithTurnstile builds a *Server under test with the given Turnstile verifier.
 func newTestServerWithTurnstile(t *testing.T, pipeline Answerer, sessions SessionRepository, ts TurnstileVerifier) *Server {
 	t.Helper()
-	srv, err := NewServer(pipeline, sessions, nil, ts, "test-site-key", nil, nil, nil)
+	srv, err := NewServer(pipeline, sessions, nil, ts, "test-site-key", nil, nil, true, nil)
 	if err != nil {
 		t.Fatalf("NewServer returned unexpected error: %v", err)
 	}
@@ -999,8 +1012,8 @@ func TestResolvePersonaMode_Optimization(t *testing.T) {
 // Interview mode tests (#31)
 // ---------------------------------------------------------------------------
 
-// interviewChatReq builds a POST /chat request for validSessionFixture, optionally
-// carrying interview header(s) and a reset flag.
+// interviewChatReq builds a POST /chat request for the validSessionFixture session,
+// optionally carrying interview header(s) and a reset flag.
 func interviewChatReq(interviewHeaderVal string, reset bool) *http.Request {
 	form := url.Values{}
 	form.Set("question", "let's go")
@@ -1059,6 +1072,27 @@ func TestHandleChat_InterviewMode_PipelineContext(t *testing.T) {
 
 	if !pipeline.gotInterviewMode {
 		t.Error("pipeline did not receive a context with InterviewModeFromContext == true")
+	}
+}
+
+// TestHandleChat_InterviewMode_DisabledKillSwitch verifies that when Interview Mode
+// is disabled server-side, an X-Interview-Mode: true request neither seeds interview
+// state nor flips the pipeline context into interview mode — it runs as standard RAG.
+func TestHandleChat_InterviewMode_DisabledKillSwitch(t *testing.T) {
+	t.Parallel()
+
+	sessions := &stubSessions{}
+	pipeline := &stubPipeline{tokens: []string{"hi"}}
+	srv := newTestServerInterviewDisabled(t, pipeline, sessions)
+
+	tf := newTestFlusher()
+	srv.ServeHTTP(tf, interviewChatReq("true", false))
+
+	if len(sessions.setInterviewCalls) != 0 {
+		t.Errorf("SetInterviewState calls = %d, want 0 (kill-switch must not seed)", len(sessions.setInterviewCalls))
+	}
+	if pipeline.gotInterviewMode {
+		t.Error("pipeline must run in standard mode when interview is disabled; InterviewModeFromContext was true")
 	}
 }
 
