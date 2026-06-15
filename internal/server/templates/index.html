@@ -372,6 +372,100 @@
         body.deadpool-theme #send-btn:hover:not(:disabled) { background: #b91c1c; }
         body.deadpool-theme #send-btn:disabled { background: #fca5a5; }
         body.deadpool-theme .streaming-cursor::after { color: #dc2626; }
+
+        /* Interview demo HUD — small, understated badge bar above the chat log.
+           Deliberately NOT boot-screen branding; just a quiet progress strip. */
+        .interview-hud {
+            flex-shrink: 0;
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 0.2rem 0.5rem;
+            font-size: 0.78rem;
+            color: #64748b;
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 0.6rem;
+            padding: 0.35rem 0.7rem;
+        }
+        /* The .interview-hud display:flex above is an author rule that beats the
+           UA [hidden]{display:none}, so the hidden attr alone won't hide it. */
+        .interview-hud[hidden] { display: none; }
+        .interview-hud a { color: #2563eb; text-decoration: none; }
+        .interview-hud a:hover { text-decoration: underline; }
+        .interview-hud label { display: inline-flex; align-items: center; gap: 0.3rem; cursor: pointer; }
+        .interview-hud input[type="checkbox"] { cursor: pointer; }
+
+        /* System / demo-mode lines — dim, mono, visually distinct from bubbles. */
+        .message.system { align-self: center; max-width: 92%; }
+        .message.system .msg-body {
+            background: transparent;
+            color: #94a3b8;
+            font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+            font-size: 0.8rem;
+            line-height: 1.5;
+            padding: 0.15rem 0.5rem;
+            text-align: center;
+        }
+
+        /* Retro CRT theme — opt-in via #retro-toggle, off by default. Nothing here
+           applies unless body.theme-terminal is set. */
+        body.theme-terminal {
+            background: #0a160d;
+            color: #4ade80;
+            font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', 'Courier New', monospace;
+        }
+        body.theme-terminal header { background: #0a160d; border-bottom: 2px solid #166534; }
+        body.theme-terminal header h1 { color: #4ade80; }
+        body.theme-terminal header p { color: #22c55e; }
+        body.theme-terminal header .nav-link { color: #86efac; border-color: #166534; }
+        body.theme-terminal header .nav-link:hover { background: #166534; border-color: #166534; color: #dcfce7; }
+        body.theme-terminal .message.assistant .msg-body {
+            background: #0d1f12;
+            color: #4ade80;
+            border: 1px solid #166534;
+            box-shadow: none;
+        }
+        body.theme-terminal .message.assistant .msg-body code,
+        body.theme-terminal .message.assistant .msg-body pre {
+            background: #06120a;
+            color: #86efac;
+        }
+        body.theme-terminal .message.user .msg-body { background: #166534; color: #dcfce7; }
+        body.theme-terminal .message.system .msg-body { color: #22c55e; }
+        body.theme-terminal .interview-hud {
+            background: #0d1f12;
+            border-color: #166534;
+            color: #4ade80;
+        }
+        body.theme-terminal .interview-hud a { color: #86efac; }
+        body.theme-terminal #chat-form {
+            background: #0d1f12;
+            border-color: #166534;
+            box-shadow: none;
+        }
+        body.theme-terminal #chat-form:focus-within { border-color: #22c55e; }
+        body.theme-terminal #question-input { color: #4ade80; }
+        body.theme-terminal #question-input::placeholder { color: #15803d; }
+        body.theme-terminal #send-btn { background: #166534; color: #dcfce7; }
+        body.theme-terminal #send-btn:hover:not(:disabled) { background: #15803d; }
+        body.theme-terminal #send-btn:disabled { background: #14532d; color: #4ade80; }
+        body.theme-terminal .streaming-cursor::after { color: #4ade80; }
+        /* Scanline overlay — present only while the retro class is set. */
+        body.theme-terminal::after {
+            content: '';
+            position: fixed;
+            inset: 0;
+            pointer-events: none;
+            z-index: 9999;
+            background: repeating-linear-gradient(
+                to bottom,
+                rgba(0, 0, 0, 0.25) 0px,
+                rgba(0, 0, 0, 0.25) 1px,
+                transparent 1px,
+                transparent 3px
+            );
+        }
     </style>
 </head>
 <body>
@@ -393,6 +487,12 @@
     </header>
 
     <div id="chat-container">
+        <div id="interview-hud" class="interview-hud" hidden>
+            Interview demo — <span id="hud-counter">Scenario 1 of 3</span>
+            · <a href="https://github.com/Anthony-Bible/sre-bible/blob/main/internal/llm/judge.go" target="_blank" rel="noopener">view code</a>
+            · <label><input type="checkbox" id="retro-toggle"> retro mode</label>
+        </div>
+
         <div id="chat-log">
         </div>
 
@@ -461,6 +561,65 @@
             return id;
         }
 
+        // --- Interview demo mode & HUD --------------------------------
+        // Backend is the source of truth for whether a session is in interview
+        // mode (persisted server-side); sessionStorage is a per-tab UI mirror so
+        // the HUD survives a reload. Session id is also per-tab, so no cross-tab
+        // drift. See issue #32.
+        function getInterviewHeader() {
+            return sessionStorage.getItem('interview_mode') === 'true' ? 'true' : 'false';
+        }
+
+        function showInterviewHUD() {
+            document.getElementById('interview-hud')?.removeAttribute('hidden');
+        }
+        function hideInterviewHUD() {
+            document.getElementById('interview-hud')?.setAttribute('hidden', '');
+        }
+
+        // applyRetroTheme syncs the CRT theme class + the toggle checkbox to the
+        // persisted retro_mode flag (the single source of truth) — mirroring
+        // applyDeadpoolTheme. Retro mode is interview-scoped; exitInterview clears it.
+        function applyRetroTheme() {
+            const on = sessionStorage.getItem('retro_mode') === 'true';
+            document.body.classList.toggle('theme-terminal', on);
+            const toggle = document.getElementById('retro-toggle');
+            if (toggle) toggle.checked = on;
+        }
+
+        // updateInterviewHUD paints the counter from the *graded* count: the
+        // scenario in play is graded + 1 (capped at total); once all are graded it
+        // shows a completion mark.
+        function updateInterviewHUD(current, total) {
+            const counter = document.getElementById('hud-counter');
+            if (!counter) return;
+            counter.textContent = current >= total
+                ? `✓ Complete · ${total} of ${total}`
+                : `Scenario ${Math.min(current + 1, total)} of ${total}`;
+        }
+
+        function activateInterview() {
+            sessionStorage.setItem('interview_mode', 'true');
+            sessionStorage.setItem('interview_graded', '0');
+            showInterviewHUD();
+            updateInterviewHUD(0, 3);
+        }
+
+        // restartInterview reseeds a fresh run. Identical to activateInterview
+        // (sets interview_mode='true' so getInterviewHeader() stays on across the
+        // next turn, resets the counter, shows the HUD); retro choice is untouched.
+        function restartInterview() {
+            activateInterview();
+        }
+
+        function exitInterview() {
+            sessionStorage.removeItem('interview_mode');
+            sessionStorage.removeItem('interview_graded');
+            sessionStorage.removeItem('retro_mode');
+            applyRetroTheme();   // drops theme-terminal + unchecks the toggle
+            hideInterviewHUD();
+        }
+
         // --- Follow-up suggestion cards (inactivity-triggered) --------
         // After an answer finishes streaming we wait this long with no typing/sending
         // before asking the backend for 1-2 grounded follow-up questions. Tune here.
@@ -486,6 +645,8 @@
         // first so only the most recent answer is ever followed up on.
         function armFollowupTimer() {
             cancelFollowups();
+            // Mid-interview, off-topic résumé suggestions would derail the demo.
+            if (getInterviewHeader() === 'true') return;
             followupTimer = setTimeout(loadFollowups, FOLLOWUP_DELAY_MS);
         }
 
@@ -558,7 +719,22 @@
 
         document.addEventListener('DOMContentLoaded', () => {
             applyDeadpoolTheme();
+            applyRetroTheme();   // retro_mode only ever set within interview mode
             restoreHistory();
+
+            // Restore the interview HUD from the per-tab sessionStorage mirror so a
+            // reload lands the visitor on the right scenario.
+            if (sessionStorage.getItem('interview_mode') === 'true') {
+                showInterviewHUD();
+                updateInterviewHUD(parseInt(sessionStorage.getItem('interview_graded') || '0', 10), 3);
+            }
+
+            // Retro-mode toggle: persist the choice, then sync the theme from it.
+            document.getElementById('retro-toggle')?.addEventListener('change', (e) => {
+                if (e.target.checked) sessionStorage.setItem('retro_mode', 'true');
+                else sessionStorage.removeItem('retro_mode');
+                applyRetroTheme();
+            });
 
             const textarea = document.getElementById('question-input');
             textarea.addEventListener('input', autoResize);
@@ -578,6 +754,13 @@
             this.style.height = Math.min(this.scrollHeight, 120) + 'px';
         }
 
+        // clearInput empties the question textarea and collapses it back to one row.
+        function clearInput() {
+            const input = document.getElementById('question-input');
+            input.value = '';
+            input.style.height = 'auto';
+        }
+
         function scrollToBottom() {
             const log = document.getElementById('chat-log');
             log.scrollTop = log.scrollHeight;
@@ -591,14 +774,23 @@
                 .replace(/"/g, '&quot;');
         }
 
-        function appendUserBubble(text) {
+        // appendBubble appends one message row (user/assistant/system) with escaped
+        // text in a .msg-body, then scrolls. Shared by the typed bubble helpers below.
+        function appendBubble(text, cls) {
             const log = document.getElementById('chat-log');
             const div = document.createElement('div');
-            div.className = 'message user';
+            div.className = cls;
             div.innerHTML = `<div class="msg-body">${escapeHTML(text)}</div>`;
             log.appendChild(div);
             scrollToBottom();
         }
+
+        function appendUserBubble(text) { appendBubble(text, 'message user'); }
+
+        // appendSystemLine renders a dim, centered "[demo]:" status line — used for
+        // interview mode transitions. Ephemeral: never persisted, so it does not
+        // reappear on reload (GET /messages returns only role/content/citations/trace).
+        function appendSystemLine(text) { appendBubble(text, 'message system'); }
 
         function showStreamingBubble() {
             const bubble = document.getElementById('streaming-bubble');
@@ -828,13 +1020,12 @@
             // Intercept text commands purely client-side
             const lowerQ = q.toLowerCase();
             if (lowerQ === '/deadpool' || lowerQ === 'chimichanga' || lowerQ === 'chimichangas' || lowerQ === 'maximum effort' || lowerQ === 'maximum-effort') {
-                document.getElementById('question-input').value = '';
-                document.getElementById('question-input').style.height = 'auto';
-                
+                clearInput();
+
                 appendUserBubble(q);
                 sessionStorage.setItem('deadpool_mode', 'true');
                 applyDeadpoolTheme();
-                
+
                 setTimeout(() => {
                     finalizeStreamingBubble(
                         "**BUSTS THROUGH THE IFRAME NAKED EXCEPT FOR STRATEGICALLY PLACED CHIMICHANGAS!** 💥 🌮\n\nDid someone order an elite SRE with a side of absolute chaos? Deadpool Mode is officially **ACTIVE**, baby! Ask me anything about Anthony's resume, and I'll tell you the absolute truth—wrapped in delicious, red-spandex-clad sarcasm! Maximum effort!",
@@ -845,13 +1036,25 @@
                 return;
             }
             if (lowerQ === '/normal' || lowerQ === '/exit' || lowerQ === 'deadpool, put your pants back on') {
-                document.getElementById('question-input').value = '';
-                document.getElementById('question-input').style.height = 'auto';
-                
+                clearInput();
+
                 appendUserBubble(q);
+
+                // /exit always tears down interview state + the HUD. exitInterview is
+                // idempotent (every step no-ops when nothing is active), so calling it
+                // unconditionally guarantees the badge is gone even if state drifted.
+                // The backend clears its own state lazily — the next normal /chat carries
+                // X-Interview-Mode: false and hits the exit branch.
+                const wasInterview = sessionStorage.getItem('interview_mode') === 'true';
+                exitInterview();
+                if (wasInterview) {
+                    appendSystemLine('[demo]: Left interview mode — back to standard chat.');
+                    return;
+                }
+
                 sessionStorage.removeItem('deadpool_mode');
                 applyDeadpoolTheme();
-                
+
                 setTimeout(() => {
                     finalizeStreamingBubble(
                         "*pouts dramatically* Fine, party pooper! Ditching the spandex and putting my boring corporate slacks back on. Resume Agent is back in standard, polite, and thoroughly professional mode.",
@@ -861,29 +1064,57 @@
                 }, 400);
                 return;
             }
-
-            document.getElementById('question-input').value = '';
-            document.getElementById('question-input').style.height = 'auto';
-            document.getElementById('suggestions')?.remove();
+            // Interview Simulator — auto-start: echo the literal command as the user
+            // bubble, then fire one /chat so the persona greets + presents Scenario 1.
+            if (lowerQ === '/interview') {
+                appendUserBubble(q);
+                activateInterview();
+                appendSystemLine('[demo]: Interview Simulator — Scenario 1 of 3');
+                streamChat('/interview');
+                return;
+            }
+            if (lowerQ === '/interview restart') {
+                appendUserBubble(q);
+                restartInterview();
+                appendSystemLine('[demo]: Interview restarted — Scenario 1 of 3');
+                streamChat('/interview restart', { reset: true });
+                return;
+            }
 
             appendUserBubble(q);
+            streamChat(q);
+        }
+
+        // streamChat performs one /chat round-trip and consumes the SSE stream.
+        // The caller owns the user bubble (so interview branches can order
+        // user bubble → [demo] line → agent stream); streamChat clears the input,
+        // sends the request with the current mode headers, and renders the answer.
+        // reset=true adds the one-shot X-Interview-Reset header (restart).
+        async function streamChat(question, { reset = false } = {}) {
+            clearInput();
+            document.getElementById('suggestions')?.remove();
+
             resetLiveTrace();
             showStreamingBubble();
             document.getElementById('send-btn').disabled = true;
 
-            const params = new URLSearchParams({ question: q });
+            const params = new URLSearchParams({ question: question });
             const tt = await getTurnstileToken();
             if (tt) params.append('cf-turnstile-response', tt);
+
+            const headers = {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'X-Session-Id': getSessionId(),
+                'X-Deadpool-Mode': getDeadpoolHeader(),
+                'X-Interview-Mode': getInterviewHeader(),
+            };
+            if (reset) headers['X-Interview-Reset'] = 'true';
 
             let resp;
             try {
                 resp = await fetch('/chat', {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/x-www-form-urlencoded',
-                        'X-Session-Id': getSessionId(),
-                        'X-Deadpool-Mode': getDeadpoolHeader(),
-                    },
+                    headers: headers,
                     body: params,
                 });
             } catch (err) {
@@ -927,6 +1158,10 @@
                         } else if (event === 'trace') {
                             currentTrace.push(JSON.parse(data).step);
                             renderLiveTrace();
+                        } else if (event === 'interview_progress') {
+                            const p = JSON.parse(data);            // {current, total}
+                            sessionStorage.setItem('interview_graded', String(p.current));
+                            updateInterviewHUD(p.current, p.total);
                         } else if (event === 'done') {
                             finalizeStreamingBubble(accum, JSON.parse(data).citations, currentTrace);
                             armFollowupTimer();
