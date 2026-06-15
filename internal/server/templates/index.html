@@ -529,6 +529,11 @@
     <script>
         marked.setOptions({ breaks: true, gfm: true });
 
+        // INTERVIEW_ENABLED mirrors the server-side INTERVIEW_MODE_ENABLED kill-switch.
+        // When false, the /interview command and HUD are hidden client-side (the backend
+        // also refuses to activate the mode, so this is purely to avoid a dead command).
+        const INTERVIEW_ENABLED = {{if .InterviewEnabled}}true{{else}}false{{end}};
+
         function safeMarkdown(text) {
             return DOMPurify.sanitize(marked.parse(text));
         }
@@ -567,6 +572,7 @@
         // the HUD survives a reload. Session id is also per-tab, so no cross-tab
         // drift. See issue #32.
         function getInterviewHeader() {
+            if (!INTERVIEW_ENABLED) return 'false';
             return sessionStorage.getItem('interview_mode') === 'true' ? 'true' : 'false';
         }
 
@@ -723,8 +729,11 @@
             restoreHistory();
 
             // Restore the interview HUD from the per-tab sessionStorage mirror so a
-            // reload lands the visitor on the right scenario.
-            if (sessionStorage.getItem('interview_mode') === 'true') {
+            // reload lands the visitor on the right scenario. If the feature has since
+            // been disabled server-side, purge any stale interview/retro state instead.
+            if (!INTERVIEW_ENABLED) {
+                exitInterview();
+            } else if (sessionStorage.getItem('interview_mode') === 'true') {
                 showInterviewHUD();
                 updateInterviewHUD(parseInt(sessionStorage.getItem('interview_graded') || '0', 10), 3);
             }
@@ -1066,14 +1075,15 @@
             }
             // Interview Simulator — auto-start: echo the literal command as the user
             // bubble, then fire one /chat so the persona greets + presents Scenario 1.
-            if (lowerQ === '/interview') {
+            // Gated by INTERVIEW_ENABLED: when off, these fall through to normal chat.
+            if (INTERVIEW_ENABLED && lowerQ === '/interview') {
                 appendUserBubble(q);
                 activateInterview();
                 appendSystemLine('[demo]: Interview Simulator — Scenario 1 of 3');
                 streamChat('/interview');
                 return;
             }
-            if (lowerQ === '/interview restart') {
+            if (INTERVIEW_ENABLED && lowerQ === '/interview restart') {
                 appendUserBubble(q);
                 restartInterview();
                 appendSystemLine('[demo]: Interview restarted — Scenario 1 of 3');

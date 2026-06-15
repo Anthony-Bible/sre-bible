@@ -45,6 +45,7 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 type chatData struct {
 	SuggestedQuestions []string
 	TurnstileSiteKey   string
+	InterviewEnabled   bool
 }
 
 // messageDTO is the JSON shape returned by GET /messages.
@@ -60,6 +61,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	data := chatData{
 		SuggestedQuestions: defaultSuggestedQuestions(),
 		TurnstileSiteKey:   s.turnstileSiteKey,
+		InterviewEnabled:   s.interviewEnabled,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -125,6 +127,14 @@ func (s *Server) resolvePersonaMode(ctx context.Context, sid string, r *http.Req
 // session row to write. DB errors are logged and treated as non-fatal — a state-store
 // hiccup must not 500 the chat turn.
 func (s *Server) resolveInterviewMode(ctx context.Context, sid string, r *http.Request) context.Context {
+	// Kill-switch: when Interview Mode is disabled, never activate it regardless of
+	// any X-Interview-* headers a client might send. Continue as standard RAG. Any
+	// stale persisted state is simply never read into context (and unreachable: the
+	// frontend hides the command, so no new state is ever seeded).
+	if !s.interviewEnabled {
+		return ctx
+	}
+
 	active, err := s.sessions.IsInterviewActive(ctx, sid)
 	if err != nil {
 		s.log.ErrorContext(ctx, "check interview active", slog.Any("err", err), slog.String("session", sid))
