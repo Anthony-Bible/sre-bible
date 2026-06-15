@@ -654,6 +654,14 @@ func TestPipeline_InterviewModeOff_RetrievalRuns(t *testing.T) {
 		t.Errorf("searcher must be called once when interview mode is off: got %d calls", searcher.calls)
 	}
 
+	// The evaluate_interview_answer tool must NOT be advertised on a standard turn,
+	// even when a Judge is configured: its schema enumerates the interview scenarios,
+	// so a non-nil Judge here would let the model offer an interview with the
+	// INTERVIEW_MODE_ENABLED kill-switch off.
+	if gen.receivedTools.Judge != nil {
+		t.Error("ToolSet.Judge must be withheld from the generator when interview mode is off")
+	}
+
 	var sawRetrieval bool
 	for _, s := range steps {
 		if s.Kind == rag.TraceKindRetrieval {

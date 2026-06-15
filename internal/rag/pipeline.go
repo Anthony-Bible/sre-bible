@@ -104,11 +104,14 @@ func WithFollowUpSuggester(s FollowUpSuggester) PipelineOption {
 }
 
 // WithJudge returns a PipelineOption that wires an interview Judge into the
-// ToolSet so the model may invoke the evaluate_interview_answer tool. Passing
-// an untyped-nil Judge keeps the tool unadvertised — the same gating pattern
-// matcher and emailer use. (A typed-nil pointer wrapped in the interface is
-// still a non-nil interface value and will advertise the tool, matching the
-// existing convention for the other tool options.)
+// Pipeline so the model may invoke the evaluate_interview_answer tool. The tool
+// is advertised only when BOTH a Judge is configured AND the turn is in interview
+// mode (InterviewModeFromContext); on a standard turn it is withheld so its
+// scenario-enumerating schema never leaks into ordinary chat. Passing an
+// untyped-nil Judge keeps the tool unadvertised in every mode — the same gating
+// pattern matcher and emailer use. (A typed-nil pointer wrapped in the interface
+// is still a non-nil interface value and will advertise the tool in interview
+// mode, matching the existing convention for the other tool options.)
 func WithJudge(j Judge) PipelineOption {
 	return func(p *Pipeline) { p.judge = j }
 }
@@ -180,7 +183,16 @@ func (p *Pipeline) Answer(ctx context.Context, sessionID string, history []Messa
 	copy(messages, history)
 	messages[len(history)] = currentMsg
 
-	tools := ToolSet{Lister: p.lister, Fetcher: p.fetcher, Matcher: p.matcher, Judge: p.judge}
+	tools := ToolSet{Lister: p.lister, Fetcher: p.fetcher, Matcher: p.matcher}
+	// The interview grading tool is only advertised while interview mode is actually
+	// active. Its schema enumerates the three SRE scenarios (by 0-based index), so
+	// exposing it on a standard turn lets the model offer an interview even when the
+	// INTERVIEW_MODE_ENABLED kill-switch is off — the switch must hide the tool, not
+	// just the persona. Gating here keeps it in lock-step with the retrieval skip and
+	// the ModeInterview persona, all keyed off InterviewModeFromContext.
+	if InterviewModeFromContext(ctx) {
+		tools.Judge = p.judge
+	}
 	if p.emailerFor != nil {
 		tools.Emailer = p.emailerFor(sessionID)
 	}
