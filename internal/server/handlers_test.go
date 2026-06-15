@@ -158,9 +158,22 @@ func (p *stubPipeline) Answer(ctx context.Context, _ string, _ []rag.Message, _ 
 // ---------------------------------------------------------------------------
 
 // newTestServer builds a *Server under test with no Turnstile verifier (skips the check).
+// Interview Mode is enabled so the interview tests exercise the live behavior; the
+// disabled kill-switch is covered separately by newTestServerInterviewDisabled.
 func newTestServer(t *testing.T, pipeline Answerer, sessions SessionRepository) *Server {
 	t.Helper()
-	srv, err := NewServer(pipeline, sessions, nil, nil, "", nil, nil, nil)
+	srv, err := NewServer(pipeline, sessions, nil, nil, "", nil, nil, true, nil)
+	if err != nil {
+		t.Fatalf("NewServer returned unexpected error: %v", err)
+	}
+	return srv
+}
+
+// newTestServerInterviewDisabled builds a *Server with Interview Mode turned off,
+// to verify the backend kill-switch.
+func newTestServerInterviewDisabled(t *testing.T, pipeline Answerer, sessions SessionRepository) *Server {
+	t.Helper()
+	srv, err := NewServer(pipeline, sessions, nil, nil, "", nil, nil, false, nil)
 	if err != nil {
 		t.Fatalf("NewServer returned unexpected error: %v", err)
 	}
@@ -170,7 +183,7 @@ func newTestServer(t *testing.T, pipeline Answerer, sessions SessionRepository) 
 // newTestServerWithTurnstile builds a *Server under test with the given Turnstile verifier.
 func newTestServerWithTurnstile(t *testing.T, pipeline Answerer, sessions SessionRepository, ts TurnstileVerifier) *Server {
 	t.Helper()
-	srv, err := NewServer(pipeline, sessions, nil, ts, "test-site-key", nil, nil, nil)
+	srv, err := NewServer(pipeline, sessions, nil, ts, "test-site-key", nil, nil, true, nil)
 	if err != nil {
 		t.Fatalf("NewServer returned unexpected error: %v", err)
 	}
@@ -989,9 +1002,9 @@ func TestResolvePersonaMode_Optimization(t *testing.T) {
 // Interview mode tests (#31)
 // ---------------------------------------------------------------------------
 
-// interviewChatReq builds a POST /chat request for the given session, optionally
-// carrying interview header(s) and a reset flag.
-func interviewChatReq(sid, interviewHeaderVal string, reset bool) *http.Request {
+// interviewChatReq builds a POST /chat request for the validSessionFixture session,
+// optionally carrying interview header(s) and a reset flag.
+func interviewChatReq(interviewHeaderVal string, reset bool) *http.Request {
 	form := url.Values{}
 	form.Set("question", "let's go")
 	req := httptest.NewRequest(http.MethodPost, "/chat", strings.NewReader(form.Encode()))
@@ -1018,7 +1031,7 @@ func TestHandleChat_InterviewMode_FirstFlipOnSeeds(t *testing.T) {
 
 	// First call: not active → seeds.
 	tf1 := newTestFlusher()
-	srv.ServeHTTP(tf1, interviewChatReq(validSessionFixture, "true", false))
+	srv.ServeHTTP(tf1, interviewChatReq("true", false))
 	if len(sessions.setInterviewCalls) != 1 {
 		t.Fatalf("SetInterviewState calls after first flip-on = %d, want 1", len(sessions.setInterviewCalls))
 	}
@@ -1029,7 +1042,7 @@ func TestHandleChat_InterviewMode_FirstFlipOnSeeds(t *testing.T) {
 
 	// Second call: stub now reports active (SetInterviewState set it) → must NOT reseed.
 	tf2 := newTestFlusher()
-	srv.ServeHTTP(tf2, interviewChatReq(validSessionFixture, "true", false))
+	srv.ServeHTTP(tf2, interviewChatReq("true", false))
 	if len(sessions.setInterviewCalls) != 1 {
 		t.Errorf("SetInterviewState calls after second turn = %d, want 1 (no reseed)", len(sessions.setInterviewCalls))
 	}
@@ -1045,10 +1058,31 @@ func TestHandleChat_InterviewMode_PipelineContext(t *testing.T) {
 	srv := newTestServer(t, pipeline, sessions)
 
 	tf := newTestFlusher()
-	srv.ServeHTTP(tf, interviewChatReq(validSessionFixture, "true", false))
+	srv.ServeHTTP(tf, interviewChatReq("true", false))
 
 	if !pipeline.gotInterviewMode {
 		t.Error("pipeline did not receive a context with InterviewModeFromContext == true")
+	}
+}
+
+// TestHandleChat_InterviewMode_DisabledKillSwitch verifies that when Interview Mode
+// is disabled server-side, an X-Interview-Mode: true request neither seeds interview
+// state nor flips the pipeline context into interview mode — it runs as standard RAG.
+func TestHandleChat_InterviewMode_DisabledKillSwitch(t *testing.T) {
+	t.Parallel()
+
+	sessions := &stubSessions{}
+	pipeline := &stubPipeline{tokens: []string{"hi"}}
+	srv := newTestServerInterviewDisabled(t, pipeline, sessions)
+
+	tf := newTestFlusher()
+	srv.ServeHTTP(tf, interviewChatReq("true", false))
+
+	if len(sessions.setInterviewCalls) != 0 {
+		t.Errorf("SetInterviewState calls = %d, want 0 (kill-switch must not seed)", len(sessions.setInterviewCalls))
+	}
+	if pipeline.gotInterviewMode {
+		t.Error("pipeline must run in standard mode when interview is disabled; InterviewModeFromContext was true")
 	}
 }
 
@@ -1062,7 +1096,7 @@ func TestHandleChat_InterviewMode_Off(t *testing.T) {
 	srv := newTestServer(t, pipeline, sessions)
 
 	tf := newTestFlusher()
-	srv.ServeHTTP(tf, interviewChatReq(validSessionFixture, "false", false))
+	srv.ServeHTTP(tf, interviewChatReq("false", false))
 
 	if sessions.clearInterviewCall != 1 {
 		t.Errorf("ClearInterviewState calls = %d, want 1", sessions.clearInterviewCall)
@@ -1085,7 +1119,7 @@ func TestHandleChat_InterviewMode_Reset(t *testing.T) {
 	srv := newTestServer(t, pipeline, sessions)
 
 	tf := newTestFlusher()
-	srv.ServeHTTP(tf, interviewChatReq(validSessionFixture, "", true))
+	srv.ServeHTTP(tf, interviewChatReq("", true))
 
 	if sessions.clearInterviewCall != 1 {
 		t.Errorf("ClearInterviewState calls = %d, want 1", sessions.clearInterviewCall)
@@ -1123,7 +1157,7 @@ func TestHandleChat_InterviewMode_ProgressEvent(t *testing.T) {
 	srv := newTestServer(t, pipeline, sessions)
 
 	tf := newTestFlusher()
-	srv.ServeHTTP(tf, interviewChatReq(validSessionFixture, "", false)) // already active, no header needed
+	srv.ServeHTTP(tf, interviewChatReq("", false)) // already active, no header needed
 
 	body := tf.Body.String()
 	if !strings.Contains(body, "event: interview_progress") {
@@ -1167,7 +1201,7 @@ func TestHandleChat_InterviewMode_NoGradeNoPersist(t *testing.T) {
 	srv := newTestServer(t, pipeline, sessions)
 
 	tf := newTestFlusher()
-	srv.ServeHTTP(tf, interviewChatReq(validSessionFixture, "", false))
+	srv.ServeHTTP(tf, interviewChatReq("", false))
 
 	if strings.Contains(tf.Body.String(), "event: interview_progress") {
 		t.Errorf("a turn with no grading must not emit interview_progress; got:\n%s", tf.Body.String())
