@@ -54,6 +54,11 @@ type Metrics struct {
 	// Follow-up suggestion cards (inactivity-triggered).
 	FollowUpSuggestions metric.Int64Counter // attr: status ("ok","empty","blocked","unverified","throttled","error")
 
+	// Session-state cache (galaxycache tier). Synchronous lookups counter; the
+	// galaxycache-internal totals are bridged separately via the observable
+	// counters registered in RegisterSessionCacheObservers.
+	SessionCacheLookups metric.Int64Counter // attr: result ("verified","unverified","error")
+
 	// Retrieval.
 	RAGRetrievalDuration metric.Float64Histogram
 	RAGChunksRetrieved   metric.Int64Histogram
@@ -234,6 +239,13 @@ func newMetrics(meter metric.Meter) (*Metrics, error) {
 		return nil, err
 	}
 
+	if m.SessionCacheLookups, err = meter.Int64Counter(
+		"sre_bible_session_cache_lookups",
+		metric.WithDescription("Session verified-flag cache lookups, labelled by result (verified/unverified/error)."),
+	); err != nil {
+		return nil, err
+	}
+
 	if m.RAGRetrievalDuration, err = meter.Float64Histogram(
 		"sre_bible_rag_retrieval_duration_seconds",
 		metric.WithUnit("s"),
@@ -276,4 +288,62 @@ func newMetrics(meter metric.Meter) (*Metrics, error) {
 	}
 
 	return m, nil
+}
+
+// SessionCacheStats is a point-in-time snapshot of the session-state cache's
+// cumulative internal counters, bridged from galaxycache's GalaxyStats into OTel
+// observable counters at collection time. Kept here (not in internal/cache) so the
+// observable instruments live alongside every other instrument and share the same
+// meter and sre_bible_ prefix; internal/cache passes a closure over galaxy.Stats.
+type SessionCacheStats struct {
+	MaincacheHits     int64 // local main-cache hits — a DB read avoided
+	BackendLoads      int64 // loads served by the backend getter — DB reads through the cache
+	PeerLoads         int64 // loads served by a peer replica
+	BackendLoadErrors int64 // backend getter errors (e.g. DB failures, never cached)
+}
+
+// RegisterSessionCacheObservers wires four observable counters that report the
+// session-state cache's cumulative totals from snapshot() at each metric
+// collection. galaxycache exposes monotonic counters, so observable counters are
+// the correct instrument — the callback simply reports the current totals rather
+// than threading deltas through the hot path. Cardinality is bounded to the single
+// galaxy ("session-verified"). Safe to call against the no-op meter (CLI binaries,
+// tests): it registers no-op instruments and returns nil.
+func RegisterSessionCacheObservers(snapshot func() SessionCacheStats) error {
+	const galaxyName = "session-verified"
+	meter := M.meter
+	attr := metric.WithAttributes(AttrString("galaxy", galaxyName))
+
+	// One spec per galaxycache stat. Adding a stat is a single table entry — the
+	// instrument creation and the callback's Observe loop both range over this,
+	// so a new counter can't be registered-but-never-observed.
+	specs := []struct {
+		name string
+		desc string
+		val  func(SessionCacheStats) int64
+	}{
+		{"sre_bible_session_cache_maincache_hits", "Session-verified cache main-cache hits (DB reads avoided).", func(s SessionCacheStats) int64 { return s.MaincacheHits }},
+		{"sre_bible_session_cache_backend_loads", "Session-verified cache backend loads (DB reads performed through the cache).", func(s SessionCacheStats) int64 { return s.BackendLoads }},
+		{"sre_bible_session_cache_peer_loads", "Session-verified cache peer loads (served from a peer replica).", func(s SessionCacheStats) int64 { return s.PeerLoads }},
+		{"sre_bible_session_cache_backend_load_errors", "Session-verified cache backend load errors.", func(s SessionCacheStats) int64 { return s.BackendLoadErrors }},
+	}
+
+	counters := make([]metric.Int64ObservableCounter, len(specs))
+	instruments := make([]metric.Observable, len(specs))
+	for i, spec := range specs {
+		c, err := meter.Int64ObservableCounter(spec.name, metric.WithDescription(spec.desc))
+		if err != nil {
+			return err
+		}
+		counters[i], instruments[i] = c, c
+	}
+
+	_, err := meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
+		s := snapshot()
+		for i, spec := range specs {
+			o.ObserveInt64(counters[i], spec.val(s), attr)
+		}
+		return nil
+	}, instruments...)
+	return err
 }
