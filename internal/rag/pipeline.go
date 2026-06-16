@@ -13,6 +13,22 @@ import (
 
 const defaultK = 8
 
+// defaultMaxPerSource caps how many chunks a single source may contribute to the
+// retrieved grounding set, so one densely-ingested project cannot monopolise the
+// top-k context and crowd out the rest of Anthony's background. With k=8 a cap of 3
+// guarantees at least three distinct sources while still letting a genuinely-relevant
+// project lead. The cap is a soft ceiling: when too few distinct sources match a query
+// to fill k, diversifyChunks backfills the remaining slots from the over-cap chunks in
+// similarity order, so a question that really is all about one project still gets a
+// full, on-topic context.
+const defaultMaxPerSource = 3
+
+// retrievalOverFetch is the multiplier applied to k when the per-source cap is active:
+// we fetch k*retrievalOverFetch candidates by similarity, then diversify down to k. A
+// larger pool gives diversifyChunks enough distinct sources to choose from. The extra
+// rows are cheap — the pgvector index scan dominates regardless of LIMIT.
+const retrievalOverFetch = 4
+
 // MaxFollowUps caps how many follow-up suggestion cards a single SuggestFollowUps
 // call may return.
 const MaxFollowUps = 2
@@ -77,6 +93,7 @@ type Pipeline struct {
 	sanitizer  PromptSanitizer
 	suggester  FollowUpSuggester
 	k          int
+	maxPerSrc  int
 	log        *slog.Logger
 	onToolCall func(string)
 }
@@ -101,6 +118,14 @@ func WithPromptSanitizer(s PromptSanitizer) PipelineOption {
 // SuggestFollowUps a no-op (returns nil, nil), so cmd/query and tests are unaffected.
 func WithFollowUpSuggester(s FollowUpSuggester) PipelineOption {
 	return func(p *Pipeline) { p.suggester = s }
+}
+
+// WithMaxChunksPerSource returns a PipelineOption that caps how many chunks a single
+// source may contribute to the retrieved grounding set, preventing one densely-ingested
+// project from monopolising the top-k context. n<=0 disables the cap (legacy behaviour:
+// pure top-k by similarity). Unset, the Pipeline uses defaultMaxPerSource.
+func WithMaxChunksPerSource(n int) PipelineOption {
+	return func(p *Pipeline) { p.maxPerSrc = n }
 }
 
 // WithJudge returns a PipelineOption that wires an interview Judge into the
@@ -137,6 +162,7 @@ func NewPipeline(embedder QueryEmbedder, searcher ChunkSearcher, generator Gener
 		matcher:    matcher,
 		emailerFor: emailerFor,
 		k:          k,
+		maxPerSrc:  defaultMaxPerSource,
 		log:        log,
 	}
 	for _, opt := range opts {
@@ -253,13 +279,22 @@ func (p *Pipeline) retrieve(ctx context.Context, question string, onToken func(s
 		return nil, Message{}, false, err
 	}
 
+	// When the per-source cap is active, over-fetch a larger similarity-ordered pool so
+	// diversifyChunks has enough distinct sources to choose from before trimming to k.
+	poolSize := p.k
+	if p.maxPerSrc > 0 {
+		poolSize = p.k * retrievalOverFetch
+	}
 	retrievalStart := time.Now()
-	chunks, err := p.searcher.SearchChunks(ctx, queryVec, p.k)
+	pool, err := p.searcher.SearchChunks(ctx, queryVec, poolSize)
 	if err != nil {
 		metrics.M.LLMErrors.Add(ctx, 1, metric.WithAttributes(metrics.AttrString("stage", "search")))
 		return nil, Message{}, false, err
 	}
 	metrics.M.RAGRetrievalDuration.Record(ctx, time.Since(retrievalStart).Seconds())
+	// Diversify down to k so no single source monopolises the grounding context, then
+	// record the count actually used as grounding (not the raw over-fetched pool).
+	chunks := diversifyChunks(pool, p.k, p.maxPerSrc)
 	metrics.M.RAGChunksRetrieved.Record(ctx, int64(len(chunks)))
 
 	// Emit the retrieval step on BOTH paths — before the zero-chunk branch — so it
@@ -281,6 +316,60 @@ func (p *Pipeline) retrieve(ctx context.Context, question string, onToken func(s
 	}
 
 	return chunks, BuildUserMessage(question, chunks), false, nil
+}
+
+// diversifyChunks rebalances a similarity-ordered candidate pool so no single source
+// monopolises the grounding context. It walks pool most-similar-first, admitting a chunk
+// while its source is under maxPerSource and holding back the rest. If the capped pass
+// yields fewer than k chunks — a query whose relevant material genuinely lives in only a
+// few sources — the held-back, over-cap chunks backfill the remaining slots in similarity
+// order, so a question that really is all about one project still gets a full, on-topic
+// context. The returned slice preserves the pool's similarity order and is at most k long.
+// maxPerSource<=0 disables the cap (pure top-k truncation), matching the legacy behaviour.
+func diversifyChunks(pool []RetrievedChunk, k, maxPerSource int) []RetrievedChunk {
+	if k <= 0 || len(pool) == 0 {
+		return nil
+	}
+	if len(pool) <= k {
+		return pool
+	}
+	if maxPerSource <= 0 {
+		return pool[:k]
+	}
+
+	picked := make([]bool, len(pool))
+	perSource := make(map[string]int, k)
+	count := 0
+
+	// Phase 1: admit in similarity order while each source stays under the cap.
+	for i, c := range pool {
+		if count >= k {
+			break
+		}
+		if perSource[c.SourceName] < maxPerSource {
+			picked[i] = true
+			perSource[c.SourceName]++
+			count++
+		}
+	}
+	// Phase 2: backfill any unfilled slots from the over-cap chunks, similarity order.
+	for i := range pool {
+		if count >= k {
+			break
+		}
+		if !picked[i] {
+			picked[i] = true
+			count++
+		}
+	}
+
+	out := make([]RetrievedChunk, 0, k)
+	for i, c := range pool {
+		if picked[i] {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // screenPrompt runs the inbound Model Armor gate on text. It returns true only when
