@@ -132,14 +132,14 @@ spec:
                   key: FOLLOWUP_EXTRA_BODY
                   optional: true
             # Session-state cache (galaxycache, ADR 0013). Phase 1 caches only the
-            # monotonic turnstile-verified flag. SESSION_CACHE_ENABLED is OFF by
-            # default: while "false" the decorator, the :9091 listener, and the
-            # peer-refresh goroutine are never constructed, so behaviour is
-            # bit-for-bit unchanged until it is deliberately flipped on. MY_POD_IP
-            # (Downward API) forms the galaxycache self ID and is fatal at startup
-            # only when the cache is enabled.
+            # monotonic turnstile-verified flag. SESSION_CACHE_ENABLED defaults OFF
+            # in code; this deployment opts in with "true". Setting it back to
+            # "false" is the rollback lever — the decorator, the :9091 listener, and
+            # the peer-refresh goroutine are then never constructed and behaviour is
+            # bit-for-bit unchanged. MY_POD_IP (Downward API) forms the galaxycache
+            # self ID and is fatal at startup only when the cache is enabled.
             - name: SESSION_CACHE_ENABLED
-              value: "false"
+              value: "true"
             - name: MY_POD_IP
               valueFrom:
                 fieldRef:
