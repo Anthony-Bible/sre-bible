@@ -16,6 +16,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/Anthony-Bible/sre-bible/internal/cache"
 	"github.com/Anthony-Bible/sre-bible/internal/db"
 	"github.com/Anthony-Bible/sre-bible/internal/email"
 	"github.com/Anthony-Bible/sre-bible/internal/gemini"
@@ -33,6 +34,7 @@ import (
 // compile-time assertions: placed here to avoid import cycles between db/rag and server.
 var (
 	_ server.SessionRepository = (*db.SessionStore)(nil)
+	_ server.SessionRepository = (*cache.CachingSessionStore)(nil)
 	_ server.Answerer          = (*rag.Pipeline)(nil)
 	_ server.Pinger            = (*pgxpool.Pool)(nil)
 	_ email.ContactRepository  = (*db.ContactStore)(nil)
@@ -104,6 +106,87 @@ func loadServerConfig() (serverConfig, error) {
 	return cfg, nil
 }
 
+// cacheConfig pairs the session-cache kill-switch with its resolved settings. When
+// enabled is false, cfg is unused and the tier is never constructed.
+type cacheConfig struct {
+	enabled bool
+	cfg     cache.Config
+}
+
+// loadCacheConfig reads the SESSION_CACHE_* environment. When SESSION_CACHE_ENABLED
+// is false (the default), it returns immediately with enabled=false and nothing else
+// is parsed — the feature stays fully inert. When enabled, MY_POD_IP is required
+// (fatal if unset, mirroring the TURNSTILE_* pattern) and the remaining knobs fall
+// back to their documented defaults. It is parsed inside run (not loadServerConfig)
+// because the env helpers need the signal ctx + logger, matching INTERVIEW_MODE_ENABLED.
+func loadCacheConfig(ctx context.Context, log *slog.Logger) (cacheConfig, error) {
+	if !envBool(ctx, "SESSION_CACHE_ENABLED", false, log) {
+		return cacheConfig{enabled: false}, nil
+	}
+
+	podIP := strings.TrimSpace(os.Getenv("MY_POD_IP"))
+	if podIP == "" {
+		return cacheConfig{}, fmt.Errorf("MY_POD_IP is required when SESSION_CACHE_ENABLED=true")
+	}
+
+	listenAddr := envString("SESSION_CACHE_LISTEN_ADDR", ":9091")
+	headlessDNS := envString("SESSION_CACHE_HEADLESS_DNS", "sre-bible-headless.sre-bible.svc.cluster.local")
+	maxBytes := envPositiveInt(ctx, "SESSION_CACHE_MAX_BYTES", 10_000_000, log)
+	ttlSeconds := envPositiveInt(ctx, "SESSION_CACHE_TTL_SECONDS", 3600, log)
+	refreshSeconds := envPositiveInt(ctx, "SESSION_CACHE_PEER_REFRESH_SECONDS", 30, log)
+
+	return cacheConfig{
+		enabled: true,
+		cfg: cache.Config{
+			SelfIP:      podIP,
+			ListenAddr:  listenAddr,
+			MaxBytes:    int64(maxBytes),
+			TTL:         time.Duration(ttlSeconds) * time.Second,
+			PeerRefresh: time.Duration(refreshSeconds) * time.Second,
+			HeadlessDNS: headlessDNS,
+		},
+	}, nil
+}
+
+// setupSessionCache builds the optional galaxycache tier in front of store. When the
+// cache is disabled it returns the raw store, a nil aux listener, and a no-op cleanup —
+// nothing is constructed and no goroutine/listener is started. When enabled it registers
+// the stats metrics, starts the peer-refresh goroutine, and returns the read-through
+// decorator, an auxListener for the peer endpoint, and a cleanup func that shuts the
+// universe down. The caller adds the listener to serveHTTP's aux slice and defers cleanup.
+func setupSessionCache(ctx context.Context, store *db.SessionStore, log *slog.Logger) (server.SessionRepository, *auxListener, func(), error) {
+	settings, err := loadCacheConfig(ctx, log)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if !settings.enabled {
+		return store, nil, func() {}, nil
+	}
+
+	tier, err := cache.New(settings.cfg, store, log)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("create session cache: %w", err)
+	}
+	if err := tier.RegisterMetrics(); err != nil {
+		return nil, nil, nil, fmt.Errorf("register session cache metrics: %w", err)
+	}
+	go tier.RefreshPeers(ctx)
+
+	cleanup := func() {
+		if err := tier.Close(); err != nil {
+			log.WarnContext(ctx, "session cache shutdown", slog.Any("err", err))
+		}
+	}
+	log.InfoContext(ctx, "session cache enabled",
+		slog.String("listen", settings.cfg.ListenAddr),
+		slog.String("headless_dns", settings.cfg.HeadlessDNS),
+		slog.Duration("ttl", settings.cfg.TTL),
+		slog.Duration("peer_refresh", settings.cfg.PeerRefresh),
+	)
+	listener := &auxListener{name: "cache peer", addr: settings.cfg.ListenAddr, handler: tier.Handler()}
+	return tier.Store(), listener, cleanup, nil
+}
+
 func run(log *slog.Logger) error {
 	cfg, err := loadServerConfig()
 	if err != nil {
@@ -118,20 +201,11 @@ func run(log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	scrapeHandler, metricsShutdown, err := metrics.Init(ctx, cfg.serviceName, log)
+	metricsHandler, metricsCleanup, err := setupMetrics(ctx, cfg.serviceName, log)
 	if err != nil {
-		return fmt.Errorf("init metrics: %w", err)
+		return err
 	}
-	defer func() {
-		if metricsShutdown == nil {
-			return
-		}
-		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := metricsShutdown(sctx); err != nil {
-			log.WarnContext(sctx, "metrics shutdown", slog.Any("err", err))
-		}
-	}()
+	defer metricsCleanup()
 
 	pool, err := db.NewPool(ctx, cfg.dbURL, log)
 	if err != nil {
@@ -151,6 +225,21 @@ func run(log *slog.Logger) error {
 	sourceStore := db.NewSourceStore(pool, log)
 	sessionStore := db.NewSessionStore(pool, log)
 	llmClient := llm.NewClient(cfg.anthropicKey, cfg.model, rag.BaseSystemPrompt, rag.DefaultPersonas(), log)
+
+	// Optional galaxycache session-state cache tier (kill-switch: SESSION_CACHE_ENABLED).
+	// When enabled, sessionRepo is the read-through decorator wrapping sessionStore and
+	// cacheListener carries the peer endpoint to run as a third listener; when disabled,
+	// sessionRepo is sessionStore itself and cacheListener is nil (behaviour bit-for-bit
+	// unchanged). Either way all session access — including interview state — flows
+	// through sessionRepo. NOTE: this must run AFTER setupMetrics: when enabled it calls
+	// tier.RegisterMetrics, which binds the cache's observable counters to the global
+	// meter that metrics.Init swaps in; registering before Init would silently bind them
+	// to the no-op meter and the sre_bible_session_cache_* stats would never export.
+	sessionRepo, cacheListener, cacheCleanup, err := setupSessionCache(ctx, sessionStore, log)
+	if err != nil {
+		return err
+	}
+	defer cacheCleanup()
 
 	suggester, err := setupFollowUpSuggester(llmClient, log)
 	if err != nil {
@@ -178,17 +267,38 @@ func run(log *slog.Logger) error {
 	// disabled, the backend refuses to activate it and the frontend hides the command.
 	cfg.interviewEnabled = envBool(ctx, "INTERVIEW_MODE_ENABLED", false, log)
 
-	srv, err := server.NewServer(pipeline, sessionStore, pool, tsVerifier, turnstileSiteKey, suggestLimiter, chatLimiter, cfg.interviewEnabled, log)
+	srv, err := server.NewServer(pipeline, sessionRepo, pool, tsVerifier, turnstileSiteKey, suggestLimiter, chatLimiter, cfg.interviewEnabled, log)
 	if err != nil {
 		return fmt.Errorf("create server: %w", err)
 	}
 
-	return serveHTTP(ctx, stop, srv, scrapeHandler, cfg.addr, cfg.metricsAddr, log)
+	// Assemble the auxiliary listeners: metrics always, the cache peer endpoint
+	// only when the session cache is enabled (cacheListener is nil otherwise).
+	aux := []auxListener{{name: "metrics", addr: cfg.metricsAddr, handler: metricsHandler}}
+	if cacheListener != nil {
+		aux = append(aux, *cacheListener)
+	}
+
+	return serveHTTP(ctx, stop, srv, cfg.addr, aux, log)
 }
 
-// serveHTTP runs the public chat listener and the metrics listener concurrently and
-// blocks until one exits or ctx is cancelled, then gracefully tears down both.
-func serveHTTP(ctx context.Context, stop context.CancelFunc, srv http.Handler, scrapeHandler http.Handler, addr, metricsAddr string, log *slog.Logger) error {
+// auxListener is a secondary HTTP listener that runs beside the public chat
+// server — the metrics scrape endpoint and, when the session cache is enabled,
+// the galaxycache peer endpoint. serveHTTP starts each entry and tears it down
+// on shutdown; the caller assembles the slice, so an absent cache means one
+// fewer entry rather than a special case here.
+type auxListener struct {
+	name    string
+	addr    string
+	handler http.Handler
+}
+
+// serveHTTP runs the public chat listener plus every auxiliary listener in aux
+// concurrently, blocking until one exits or ctx is cancelled, then gracefully
+// tears all of them down. aux is whatever the caller assembled (metrics always,
+// the cache peer endpoint only when enabled) — there is no per-listener
+// special-casing in here.
+func serveHTTP(ctx context.Context, stop context.CancelFunc, srv http.Handler, addr string, aux []auxListener, log *slog.Logger) error {
 	httpSrv := &http.Server{
 		Addr:    addr,
 		Handler: srv,
@@ -199,34 +309,46 @@ func serveHTTP(ctx context.Context, stop context.CancelFunc, srv http.Handler, s
 		// WriteTimeout is intentionally omitted — SSE streams are long-lived.
 	}
 
-	metricsMux := http.NewServeMux()
-	metricsMux.Handle("GET /metrics", scrapeHandler)
-	metricsSrv := &http.Server{
-		Addr:              metricsAddr,
-		Handler:           metricsMux,
-		ReadHeaderTimeout: 5 * time.Second,
+	auxSrvs := make([]*http.Server, len(aux))
+	for i, a := range aux {
+		auxSrvs[i] = &http.Server{
+			Addr:              a.addr,
+			Handler:           a.handler,
+			ReadHeaderTimeout: 5 * time.Second,
+		}
 	}
 
 	log.InfoContext(ctx, "server listening", slog.String("addr", addr))
-	log.InfoContext(ctx, "metrics listening", slog.String("addr", metricsAddr))
+	for _, a := range aux {
+		log.InfoContext(ctx, a.name+" listening", slog.String("addr", a.addr))
+	}
 
-	errCh := make(chan error, 2)
+	shutdownAux := func(shutdownCtx context.Context) {
+		for _, s := range auxSrvs {
+			_ = s.Shutdown(shutdownCtx)
+		}
+	}
+
+	errCh := make(chan error, 1+len(auxSrvs))
 	go func() {
 		errCh <- httpSrv.ListenAndServe()
 	}()
-	go func() {
-		if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- fmt.Errorf("metrics listener: %w", err)
-		}
-	}()
+	for i := range auxSrvs {
+		s, name := auxSrvs[i], aux[i].name
+		go func() {
+			if err := s.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- fmt.Errorf("%s listener: %w", name, err)
+			}
+		}()
+	}
 
 	select {
 	case err := <-errCh:
-		// One listener exited (bind failure, panic, etc.). Tear down the other
-		// before returning so it doesn't keep running orphaned.
+		// One listener exited (bind failure, panic, etc.). Tear down the others
+		// before returning so they don't keep running orphaned.
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_ = metricsSrv.Shutdown(shutdownCtx)
+		shutdownAux(shutdownCtx)
 		_ = httpSrv.Shutdown(shutdownCtx)
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
@@ -237,7 +359,7 @@ func serveHTTP(ctx context.Context, stop context.CancelFunc, srv http.Handler, s
 		log.InfoContext(ctx, "shutting down", slog.String("reason", ctx.Err().Error()))
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		_ = metricsSrv.Shutdown(shutdownCtx)
+		shutdownAux(shutdownCtx)
 		if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 			return fmt.Errorf("shutdown: %w", err)
 		}
@@ -368,6 +490,14 @@ func setupChatLimiter(ctx context.Context, log *slog.Logger) *ratelimit.Limiter 
 	return ratelimit.New(interval, globalLimit)
 }
 
+// envString reads key as a trimmed string, returning def when unset or blank.
+func envString(key, def string) string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
+	}
+	return def
+}
+
 // envBool reads key as a boolean (strconv.ParseBool syntax: 1/t/true, 0/f/false),
 // returning def when unset and def + a warning when unparseable.
 func envBool(ctx context.Context, key string, def bool, log *slog.Logger) bool {
@@ -404,6 +534,30 @@ func envPositiveInt(ctx context.Context, key string, def int, log *slog.Logger) 
 		return def
 	}
 	return n
+}
+
+// setupMetrics initialises the Prometheus-exporting meter provider and returns a
+// handler serving the scrape endpoint at GET /metrics plus a cleanup func that
+// flushes and stops the provider on shutdown (a no-op when Init returned no
+// shutdown hook).
+func setupMetrics(ctx context.Context, serviceName string, log *slog.Logger) (http.Handler, func(), error) {
+	scrapeHandler, metricsShutdown, err := metrics.Init(ctx, serviceName, log)
+	if err != nil {
+		return nil, nil, fmt.Errorf("init metrics: %w", err)
+	}
+	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", scrapeHandler)
+	cleanup := func() {
+		if metricsShutdown == nil {
+			return
+		}
+		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := metricsShutdown(sctx); err != nil {
+			log.WarnContext(sctx, "metrics shutdown", slog.Any("err", err))
+		}
+	}
+	return mux, cleanup, nil
 }
 
 // setupTurnstile reads the two required Turnstile env vars and returns the site key

@@ -267,7 +267,7 @@ func TestRunEval_TrimsAndCapsConcepts(t *testing.T) {
 	c := newTestClient()
 	long := strings.Repeat("x", maxJudgeConceptChars+20)
 	concepts := []string{"singleflight", "   ", "", "circuit breaker", long}
-	for i := 0; i < maxJudgeConcepts; i++ {
+	for range maxJudgeConcepts {
 		concepts = append(concepts, "extra")
 	}
 	j := &stubJudge{eval: &rag.InterviewEvaluation{Score: 80, ConceptsDemonstrated: concepts}}

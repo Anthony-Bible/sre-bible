@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: sre-bible-headless
+  namespace: sre-bible
+spec:
+  # Headless (clusterIP: None) so a DNS lookup of this name returns the A records
+  # of every ready pod individually. The galaxycache peer-refresh loop resolves
+  # this name to discover sibling replicas and build their http://<podIP>:9091
+  # peer URLs. publishNotReadyAddresses keeps a starting/terminating replica
+  # resolvable so peers can still reach it during rollouts (the cache is
+  # fail-open, so a stale peer only ever costs an extra DB read).
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: sre-bible
+  ports:
+    - name: cache
+      port: 9091
+      targetPort: cache

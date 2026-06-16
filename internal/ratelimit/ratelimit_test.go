@@ -56,7 +56,7 @@ func TestLimiter_GlobalCeiling(t *testing.T) {
 		const global = 5
 		l := New(time.Second, global)
 
-		for i := 0; i < global; i++ {
+		for i := range global {
 			if !l.Allow(fmt.Sprintf("key-%d", i)) {
 				t.Fatalf("call %d of %d under the global cap must be allowed", i+1, global)
 			}
@@ -109,7 +109,7 @@ func TestLimiter_IdleEviction(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		l := New(time.Second, 100000)
 
-		for i := 0; i < 50; i++ {
+		for i := range 50 {
 			l.Allow(fmt.Sprintf("burst-%d", i))
 		}
 
