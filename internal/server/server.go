@@ -16,11 +16,16 @@ import (
 //go:embed templates
 var templateFS embed.FS
 
+// DefaultQuickDBTimeoutMS is the default quick-DB-phase deadline in milliseconds. It is
+// the single source of truth shared by the NewServer fallback (below) and the
+// DB_QUICK_TIMEOUT_MS env default in cmd/server, so the two cannot drift.
+const DefaultQuickDBTimeoutMS = 2500
+
 // defaultQuickDBTimeout bounds the per-request "quick" DB phase (session-state reads,
 // history loads, session creation). It is deliberately shorter than the DB-side
 // statement_timeout (db.NewPool, 5s) so that under pool saturation the context deadline
 // fires first and the request sheds a 503 rather than queuing on connection acquisition.
-const defaultQuickDBTimeout = 2500 * time.Millisecond
+const defaultQuickDBTimeout = DefaultQuickDBTimeoutMS * time.Millisecond
 
 // Answerer is the port for streaming answers. Satisfied by *rag.Pipeline.
 type Answerer interface {

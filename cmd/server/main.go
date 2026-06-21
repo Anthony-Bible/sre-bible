@@ -270,7 +270,7 @@ func run(log *slog.Logger) error {
 	// Quick-DB-phase deadline: bounds the pre-stream session/history DB ops so a saturated
 	// pool sheds 503 (acquire-wait load-shed) instead of piling up. Shorter than the DB-side
 	// statement_timeout so the context fires first. Invalid/non-positive → default + warn.
-	quickDBTimeout := time.Duration(envPositiveInt(ctx, "DB_QUICK_TIMEOUT_MS", 2500, log)) * time.Millisecond
+	quickDBTimeout := time.Duration(envPositiveInt(ctx, "DB_QUICK_TIMEOUT_MS", server.DefaultQuickDBTimeoutMS, log)) * time.Millisecond
 
 	srv, err := server.NewServer(pipeline, sessionRepo, pool, tsVerifier, turnstileSiteKey, suggestLimiter, chatLimiter, cfg.interviewEnabled, quickDBTimeout, log)
 	if err != nil {

@@ -186,14 +186,23 @@ func (s *Server) quickDBContext(parent context.Context) (context.Context, contex
 	return context.WithTimeout(parent, s.quickDBTimeout)
 }
 
-// writeServiceUnavailable sheds a request when the DB pool is saturated: it sets a
-// Retry-After hint, writes 503, and records the load-shed metric for endpoint. ctx is
-// the (non-deadline) request context, used only for the metric record. Call before any
-// response body/headers have been committed — for /chat that means before SSE headers.
-func writeServiceUnavailable(ctx context.Context, w http.ResponseWriter, endpoint string) {
-	metrics.M.DBLoadShed.Add(ctx, 1, metric.WithAttributes(metrics.AttrString("endpoint", endpoint)))
+// shedIfSaturated reports whether err signals quick-DB-phase pool saturation (the
+// deadline fired while waiting to acquire a connection). When it does, it sheds the
+// request — sets a Retry-After hint, writes 503, records the load-shed metric for
+// endpoint — and returns true so the caller can return immediately; otherwise it
+// returns false and the caller handles err per its own policy (500, silent degrade,
+// etc.). reqCtx is the (non-deadline) request context, used only for the metric record.
+// Centralising the saturation predicate here keeps "what counts as a shed" in one place.
+// Call before any response body/headers have been committed — for /chat that means
+// before SSE headers.
+func shedIfSaturated(reqCtx context.Context, err error, w http.ResponseWriter, endpoint string) bool {
+	if !errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	metrics.M.DBLoadShed.Add(reqCtx, 1, metric.WithAttributes(metrics.AttrString("endpoint", endpoint)))
 	w.Header().Set("Retry-After", retryAfterShedSeconds)
 	http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+	return true
 }
 
 // snapshotSessionState reads the per-turn session flags in a single SELECT. On a read
@@ -227,16 +236,14 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	// persona resolution simply starts from "not deadpool", as before — UNLESS the read
 	// failed because the quick deadline fired (pool saturated), in which case shed 503.
 	state, ok := s.snapshotSessionState(ctx, sid)
-	if !ok && errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		writeServiceUnavailable(r.Context(), w, "messages")
+	if !ok && shedIfSaturated(r.Context(), ctx.Err(), w, "messages") {
 		return
 	}
 	ctx = s.resolvePersonaMode(ctx, sid, r, state.DeadpoolMode)
 
 	stored, err := s.sessions.ListMessages(ctx, sid)
 	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			writeServiceUnavailable(r.Context(), w, "messages")
+		if shedIfSaturated(r.Context(), err, w, "messages") {
 			return
 		}
 		s.log.ErrorContext(r.Context(), "list messages", slog.Any("err", err), slog.String("session", sid))
@@ -313,8 +320,7 @@ func (s *Server) handleSuggestions(w http.ResponseWriter, r *http.Request) {
 	if s.turnstile != nil {
 		verified, err := s.sessions.IsSessionVerified(dbCtx, sid)
 		if err != nil {
-			if errors.Is(err, context.DeadlineExceeded) {
-				writeServiceUnavailable(ctx, w, "suggestions")
+			if shedIfSaturated(ctx, err, w, "suggestions") {
 				return
 			}
 			s.log.ErrorContext(ctx, "check session verified", slog.Any("err", err), slog.String("session", sid))
@@ -349,8 +355,7 @@ func (s *Server) handleSuggestions(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Pool saturation: shed an explicit 503 so the client backs off, rather than the
 		// silent {"questions":[]} degrade used for genuine (non-abuse, non-saturation) errors.
-		if errors.Is(err, context.DeadlineExceeded) {
-			writeServiceUnavailable(ctx, w, "suggestions")
+		if shedIfSaturated(ctx, err, w, "suggestions") {
 			return
 		}
 		s.log.ErrorContext(ctx, "list messages", slog.Any("err", err), slog.String("session", sid))
@@ -451,8 +456,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		// A fired quick deadline means the pool is saturated → shed 503 (takes priority
 		// over the gate-safety 500 below).
-		if errors.Is(dbCtx.Err(), context.DeadlineExceeded) {
-			writeServiceUnavailable(r.Context(), w, "chat")
+		if shedIfSaturated(r.Context(), dbCtx.Err(), w, "chat") {
 			return
 		}
 		if s.turnstile != nil {
@@ -467,8 +471,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	ctx := s.resolvePersonaMode(r.Context(), sid, r, state.DeadpoolMode)
 
 	if err := s.sessions.CreateSession(dbCtx, sid); err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			writeServiceUnavailable(r.Context(), w, "chat")
+		if shedIfSaturated(r.Context(), err, w, "chat") {
 			return
 		}
 		s.log.ErrorContext(ctx, "create session", slog.Any("err", err), slog.String("session", sid))
@@ -502,8 +505,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// This is the last pre-stream DB op; everything after it streams.
 	stored, err := s.sessions.ListMessages(dbCtx, sid)
 	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			writeServiceUnavailable(r.Context(), w, "chat")
+		if shedIfSaturated(r.Context(), err, w, "chat") {
 			return
 		}
 		s.log.ErrorContext(ctx, "list messages", slog.Any("err", err), slog.String("session", sid))
