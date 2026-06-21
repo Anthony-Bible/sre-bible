@@ -566,6 +566,15 @@
             return id;
         }
 
+        // hasStoredSession reports whether this tab already has a session id WITHOUT
+        // minting one (unlike getSessionId, which lazily creates one). The id is only
+        // ever created by the post-interaction paths (/chat, /suggestions), so "no
+        // stored id" is a reliable proxy for "this visitor has never chatted → there is
+        // nothing server-side to restore."
+        function hasStoredSession() {
+            return !!sessionStorage.getItem('sre_session_id');
+        }
+
         // --- Interview demo mode & HUD --------------------------------
         // Backend is the source of truth for whether a session is in interview
         // mode (persisted server-side); sessionStorage is a per-tab UI mirror so
@@ -701,6 +710,12 @@
         }
 
         async function restoreHistory() {
+            // A brand-new tab has no stored session id (getSessionId mints one only on
+            // the first /chat or /suggestions call), so there is no server-side history
+            // to restore — skip the /messages fetch entirely. This keeps the common
+            // spike visitor (load page, read, leave) at zero DB reads on load; only a
+            // visitor who has actually chatted pays for /messages on reload.
+            if (!hasStoredSession()) return;
             let resp;
             try {
                 resp = await fetch('/messages', {

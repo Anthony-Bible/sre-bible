@@ -172,6 +172,30 @@ func (s *Server) resolveInterviewMode(ctx context.Context, sid string, r *http.R
 	}
 }
 
+// retryAfterShedSeconds is the Retry-After hint sent with a load-shed 503, telling a
+// client to back off briefly rather than hammer a saturated pool.
+const retryAfterShedSeconds = "5"
+
+// quickDBContext derives a short-deadline context for the per-request "quick" DB phase
+// (session-state reads, history loads, session creation). pgxpool.Acquire honours the
+// context deadline, so on a saturated pool the deadline fires while waiting for a free
+// connection and the caller sheds a 503 instead of piling up. It must NOT wrap the
+// long-running LLM/SSE stream, which keeps the full request context. The deadline is
+// shorter than the DB-side statement_timeout (db.NewPool) so the context fires first.
+func (s *Server) quickDBContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(parent, s.quickDBTimeout)
+}
+
+// writeServiceUnavailable sheds a request when the DB pool is saturated: it sets a
+// Retry-After hint, writes 503, and records the load-shed metric for endpoint. ctx is
+// the (non-deadline) request context, used only for the metric record. Call before any
+// response body/headers have been committed — for /chat that means before SSE headers.
+func writeServiceUnavailable(ctx context.Context, w http.ResponseWriter, endpoint string) {
+	metrics.M.DBLoadShed.Add(ctx, 1, metric.WithAttributes(metrics.AttrString("endpoint", endpoint)))
+	w.Header().Set("Retry-After", retryAfterShedSeconds)
+	http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+}
+
 // snapshotSessionState reads the per-turn session flags in a single SELECT. On a read
 // error it logs and returns the zero value (all defaults) with ok=false; callers behind
 // the Turnstile gate must treat ok=false as fatal (can't confirm verification → must not
@@ -192,14 +216,29 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Quick DB phase: bound the per-session reads with a short deadline so a saturated
+	// pool sheds 503 instead of queuing on connection acquisition. This whole handler is
+	// a couple of cheap reads (no LLM), so the same deadline covers the lot.
+	ctx, cancel := s.quickDBContext(r.Context())
+	defer cancel()
+
 	// One round-trip for the per-session flags, replacing the lone IsDeadpoolMode read.
 	// No turnstile gate here, so a read error degrades to the zero value (non-fatal):
-	// persona resolution simply starts from "not deadpool", as before.
-	state, _ := s.snapshotSessionState(r.Context(), sid)
-	ctx := s.resolvePersonaMode(r.Context(), sid, r, state.DeadpoolMode)
+	// persona resolution simply starts from "not deadpool", as before — UNLESS the read
+	// failed because the quick deadline fired (pool saturated), in which case shed 503.
+	state, ok := s.snapshotSessionState(ctx, sid)
+	if !ok && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		writeServiceUnavailable(r.Context(), w, "messages")
+		return
+	}
+	ctx = s.resolvePersonaMode(ctx, sid, r, state.DeadpoolMode)
 
 	stored, err := s.sessions.ListMessages(ctx, sid)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			writeServiceUnavailable(r.Context(), w, "messages")
+			return
+		}
 		s.log.ErrorContext(r.Context(), "list messages", slog.Any("err", err), slog.String("session", sid))
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -263,11 +302,21 @@ func (s *Server) handleSuggestions(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 
+	// Quick DB phase: the verified-gate read and the pre-LLM history read are bounded by
+	// a short deadline so a saturated pool sheds 503 instead of queuing. The LLM/suggester
+	// call below keeps the full request context (ctx), not this one.
+	dbCtx, cancel := s.quickDBContext(ctx)
+	defer cancel()
+
 	// Abuse gate: require the session to have already passed Turnstile via /chat.
 	// Skipped when no verifier is configured (tests, local dev without keys).
 	if s.turnstile != nil {
-		verified, err := s.sessions.IsSessionVerified(ctx, sid)
+		verified, err := s.sessions.IsSessionVerified(dbCtx, sid)
 		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				writeServiceUnavailable(ctx, w, "suggestions")
+				return
+			}
 			s.log.ErrorContext(ctx, "check session verified", slog.Any("err", err), slog.String("session", sid))
 			http.Error(w, "session error", http.StatusInternalServerError)
 			return
@@ -296,8 +345,14 @@ func (s *Server) handleSuggestions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stored, err := s.sessions.ListMessages(ctx, sid)
+	stored, err := s.sessions.ListMessages(dbCtx, sid)
 	if err != nil {
+		// Pool saturation: shed an explicit 503 so the client backs off, rather than the
+		// silent {"questions":[]} degrade used for genuine (non-abuse, non-saturation) errors.
+		if errors.Is(err, context.DeadlineExceeded) {
+			writeServiceUnavailable(ctx, w, "suggestions")
+			return
+		}
 		s.log.ErrorContext(ctx, "list messages", slog.Any("err", err), slog.String("session", sid))
 		writeSuggestions(w, nil)
 		return
@@ -381,21 +436,41 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Quick DB phase: the pre-stream reads/writes (session-state snapshot, CreateSession,
+	// and the history load below) are bounded by a short deadline so a saturated pool
+	// sheds a clean HTTP 503 before any SSE response is committed, instead of queuing on
+	// connection acquisition. The persona/interview-derived ctx handed to the stream keeps
+	// the full request context (r.Context()), so the LLM path is unaffected.
+	dbCtx, cancel := s.quickDBContext(r.Context())
+	defer cancel()
+
 	// Snapshot the per-session flags in a single SELECT, replacing what used to be three
 	// separate single-column reads of the same row (deadpool / verified / interview-active).
 	// Read before resolvePersonaMode/CreateSession to preserve the existing ordering.
-	state, ok := s.snapshotSessionState(r.Context(), sid)
-	if !ok && s.turnstile != nil {
-		// Read failed and we can't confirm verification → must not bypass the gate.
-		// Mirrors the old verifyTurnstile 500-on-read-error behavior. With no turnstile
-		// (tests/local) the error is non-fatal and we run on the zero-value defaults.
-		http.Error(w, "session error", http.StatusInternalServerError)
-		return
+	state, ok := s.snapshotSessionState(dbCtx, sid)
+	if !ok {
+		// A fired quick deadline means the pool is saturated → shed 503 (takes priority
+		// over the gate-safety 500 below).
+		if errors.Is(dbCtx.Err(), context.DeadlineExceeded) {
+			writeServiceUnavailable(r.Context(), w, "chat")
+			return
+		}
+		if s.turnstile != nil {
+			// Read failed and we can't confirm verification → must not bypass the gate.
+			// Mirrors the old verifyTurnstile 500-on-read-error behavior. With no turnstile
+			// (tests/local) the error is non-fatal and we run on the zero-value defaults.
+			http.Error(w, "session error", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	ctx := s.resolvePersonaMode(r.Context(), sid, r, state.DeadpoolMode)
 
-	if err := s.sessions.CreateSession(ctx, sid); err != nil {
+	if err := s.sessions.CreateSession(dbCtx, sid); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			writeServiceUnavailable(r.Context(), w, "chat")
+			return
+		}
 		s.log.ErrorContext(ctx, "create session", slog.Any("err", err), slog.String("session", sid))
 		http.Error(w, "failed to initialise session", http.StatusInternalServerError)
 		return
@@ -422,6 +497,20 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// resulting mode rides the context; streamAnswer reads it back off ctx.
 	ctx = s.resolveInterviewMode(ctx, sid, r, state.InterviewActive)
 
+	// Load history under the quick deadline BEFORE committing to an SSE response, so a
+	// saturated pool sheds a clean HTTP 503 rather than a 200 stream with an error frame.
+	// This is the last pre-stream DB op; everything after it streams.
+	stored, err := s.sessions.ListMessages(dbCtx, sid)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			writeServiceUnavailable(r.Context(), w, "chat")
+			return
+		}
+		s.log.ErrorContext(ctx, "list messages", slog.Any("err", err), slog.String("session", sid))
+		http.Error(w, "failed to load history", http.StatusInternalServerError)
+		return
+	}
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
@@ -429,13 +518,6 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming not supported", http.StatusInternalServerError)
-		return
-	}
-
-	stored, err := s.sessions.ListMessages(ctx, sid)
-	if err != nil {
-		s.log.ErrorContext(ctx, "list messages", slog.Any("err", err), slog.String("session", sid))
-		_ = sseError(w, flusher, "failed to load history")
 		return
 	}
 

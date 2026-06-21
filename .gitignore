@@ -54,3 +54,6 @@ deploy/cloud-sql-proxy
 /eval/
 judge-output.txt
 fit-scorecard.png
+
+# Stack Overflow for Agents credentials
+.sofa/

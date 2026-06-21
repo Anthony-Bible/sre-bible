@@ -42,6 +42,10 @@ type Metrics struct {
 	HTTPDuration metric.Float64Histogram   // attrs: route, method, unit: s
 	HTTPInFlight metric.Int64UpDownCounter // currently-serving requests ("live")
 
+	// Load-shedding: requests rejected with 503 when the DB pool is saturated and the
+	// short quick-DB-phase context deadline fires while waiting to acquire a connection.
+	DBLoadShed metric.Int64Counter // attr: endpoint ("messages","suggestions","chat")
+
 	// LLM / RAG outcomes.
 	LLMResponsesServed  metric.Int64Counter     // successful streamed answers
 	LLMResponsesBlocked metric.Int64Counter     // attr: reason ("model_armor", "turnstile", "rate_limited")
@@ -195,6 +199,12 @@ func newMetrics(meter metric.Meter) (*Metrics, error) {
 	if m.HTTPInFlight, err = meter.Int64UpDownCounter(
 		"sre_bible_http_requests_in_flight",
 		metric.WithDescription("HTTP requests currently being handled."),
+	); err != nil {
+		return nil, err
+	}
+	if m.DBLoadShed, err = meter.Int64Counter(
+		"sre_bible_db_load_shed",
+		metric.WithDescription("Requests shed with 503 when the DB pool is saturated, labelled by endpoint."),
 	); err != nil {
 		return nil, err
 	}

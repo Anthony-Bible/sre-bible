@@ -24,6 +24,21 @@ func NewPool(ctx context.Context, databaseURL string, log *slog.Logger) (*pgxpoo
 	cfg.MaxConnIdleTime = 5 * time.Minute
 	cfg.MaxConnLifetime = 30 * time.Minute
 
+	// Bound every statement at the DB so a slow/stuck query can't pin one of the five
+	// pooled connections indefinitely and starve the rest under a traffic spike. This is
+	// the DB-side backstop; the request-side load-shed (a short context deadline that
+	// bounds pool-acquire wait → HTTP 503) lives in internal/server. Set on ConnConfig
+	// before the Copy() below so the bootstrap connection inherits it too (its lone
+	// CREATE EXTENSION statement is trivially fast).
+	//
+	// Caveat: migrations run via goose on this same pool at startup (cmd/server/main.go →
+	// internal/db/migrate.go), so this cap also applies to migration DDL. Current
+	// migrations are tiny idempotent ADD COLUMN / guarded-CREATE ops and are safe under
+	// 5s. Any future heavy DDL (e.g. building an ivfflat/hnsw index on a populated
+	// embeddings table) MUST override it locally with `SET LOCAL statement_timeout = 0;`
+	// at the top of that migration. See ADR 0014.
+	cfg.ConnConfig.RuntimeParams["statement_timeout"] = "5000" // milliseconds
+
 	// Bootstrap the pgvector extension before wiring RegisterTypes below.
 	// RegisterTypes looks up the `vector` type OID on every new connection and
 	// errors ("vector type not found") if the extension was never created. But

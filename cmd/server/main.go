@@ -267,7 +267,12 @@ func run(log *slog.Logger) error {
 	// disabled, the backend refuses to activate it and the frontend hides the command.
 	cfg.interviewEnabled = envBool(ctx, "INTERVIEW_MODE_ENABLED", false, log)
 
-	srv, err := server.NewServer(pipeline, sessionRepo, pool, tsVerifier, turnstileSiteKey, suggestLimiter, chatLimiter, cfg.interviewEnabled, log)
+	// Quick-DB-phase deadline: bounds the pre-stream session/history DB ops so a saturated
+	// pool sheds 503 (acquire-wait load-shed) instead of piling up. Shorter than the DB-side
+	// statement_timeout so the context fires first. Invalid/non-positive → default + warn.
+	quickDBTimeout := time.Duration(envPositiveInt(ctx, "DB_QUICK_TIMEOUT_MS", 2500, log)) * time.Millisecond
+
+	srv, err := server.NewServer(pipeline, sessionRepo, pool, tsVerifier, turnstileSiteKey, suggestLimiter, chatLimiter, cfg.interviewEnabled, quickDBTimeout, log)
 	if err != nil {
 		return fmt.Errorf("create server: %w", err)
 	}
