@@ -93,13 +93,15 @@ func (r *Runner) Run(ctx context.Context, c GoldenCase) Result {
 		toolCalls = append(toolCalls, toolName)
 	}
 
+	matcher := rag.NewMatcher(r.embedder, rec)
+
 	pipe := rag.NewPipeline(
 		r.embedder,
 		rec,
 		r.generator,
 		r.lister,
 		r.fetcher,
-		nil, // matcher — not used in eval
+		matcher,
 		nil, // emailerFor — not used in eval
 		r.k, // 0 → rag default (top-k=8); sweep overrides via WithRunnerK
 		r.log,
