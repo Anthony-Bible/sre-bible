@@ -291,6 +291,36 @@ func TestHandleSuggestions_Throttled(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// TestHandleSuggestions_LoadShed
+// ---------------------------------------------------------------------------
+
+// TestHandleSuggestions_LoadShed verifies that when the verified-gate read blocks past
+// the quick deadline (saturated pool), POST /suggestions sheds an explicit 503 with a
+// Retry-After hint — distinct from the silent {"questions":[]} degrade — and never
+// reaches the suggester.
+func TestHandleSuggestions_LoadShed(t *testing.T) {
+	t.Parallel()
+
+	sessions := &stubSessions{isVerified: true, blockReads: true, messages: oneTurn()}
+	pipeline := &stubSuggestPipeline{questions: []string{"should not surface"}}
+	srv := newTestServerWithTurnstile(t, pipeline, sessions, &stubTurnstile{})
+	srv.quickDBTimeout = 25 * time.Millisecond
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, suggestRequest())
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d (load shed)", rr.Code, http.StatusServiceUnavailable)
+	}
+	if rr.Header().Get("Retry-After") == "" {
+		t.Error("a load-shed 503 must carry a Retry-After header")
+	}
+	if pipeline.suggestCalls != 0 {
+		t.Errorf("SuggestFollowUps called %d time(s), want 0 on a shed", pipeline.suggestCalls)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // TestHandleSuggestions_NoTurnstile_SkipsGate
 // ---------------------------------------------------------------------------
 

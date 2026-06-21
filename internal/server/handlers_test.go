@@ -36,6 +36,12 @@ type stubSessions struct {
 	setDeadpoolCalls []bool
 	getStateErr      error
 
+	// blockReads makes the quick-phase DB reads (GetSessionState, ListMessages,
+	// IsSessionVerified, CreateSession) block on the context until its deadline fires,
+	// then return ctx.Err(). It models a saturated pool so the load-shed path can be
+	// exercised: with a tiny quickDBTimeout the handler sees context.DeadlineExceeded.
+	blockReads bool
+
 	interviewActive    bool
 	interviewState     *rag.InterviewState
 	isInterviewErr     error
@@ -53,11 +59,19 @@ type appendedCall struct {
 	trace     []rag.TraceStep
 }
 
-func (s *stubSessions) CreateSession(_ context.Context, _ string) error {
+func (s *stubSessions) CreateSession(ctx context.Context, _ string) error {
+	if s.blockReads {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	return s.createErr
 }
 
-func (s *stubSessions) ListMessages(_ context.Context, _ string) ([]StoredMessage, error) {
+func (s *stubSessions) ListMessages(ctx context.Context, _ string) ([]StoredMessage, error) {
+	if s.blockReads {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	return s.messages, s.listErr
 }
 
@@ -66,7 +80,11 @@ func (s *stubSessions) AppendMessage(_ context.Context, sid string, msg rag.Mess
 	return s.appendErr
 }
 
-func (s *stubSessions) IsSessionVerified(_ context.Context, _ string) (bool, error) {
+func (s *stubSessions) IsSessionVerified(ctx context.Context, _ string) (bool, error) {
+	if s.blockReads {
+		<-ctx.Done()
+		return false, ctx.Err()
+	}
 	return s.isVerified, s.verifyErr
 }
 
@@ -89,7 +107,11 @@ func (s *stubSessions) IsInterviewActive(_ context.Context, _ string) (bool, err
 	return s.interviewActive, s.isInterviewErr
 }
 
-func (s *stubSessions) GetSessionState(_ context.Context, _ string) (SessionState, error) {
+func (s *stubSessions) GetSessionState(ctx context.Context, _ string) (SessionState, error) {
+	if s.blockReads {
+		<-ctx.Done()
+		return SessionState{}, ctx.Err()
+	}
 	return SessionState{
 		Verified:        s.isVerified,
 		DeadpoolMode:    s.deadpoolMode,
@@ -172,7 +194,7 @@ func (p *stubPipeline) Answer(ctx context.Context, _ string, _ []rag.Message, _ 
 // disabled kill-switch is covered separately by newTestServerInterviewDisabled.
 func newTestServer(t *testing.T, pipeline Answerer, sessions SessionRepository) *Server {
 	t.Helper()
-	srv, err := NewServer(pipeline, sessions, nil, nil, "", nil, nil, true, nil)
+	srv, err := NewServer(pipeline, sessions, nil, nil, "", nil, nil, true, 0, nil)
 	if err != nil {
 		t.Fatalf("NewServer returned unexpected error: %v", err)
 	}
@@ -183,7 +205,7 @@ func newTestServer(t *testing.T, pipeline Answerer, sessions SessionRepository) 
 // to verify the backend kill-switch.
 func newTestServerInterviewDisabled(t *testing.T, pipeline Answerer, sessions SessionRepository) *Server {
 	t.Helper()
-	srv, err := NewServer(pipeline, sessions, nil, nil, "", nil, nil, false, nil)
+	srv, err := NewServer(pipeline, sessions, nil, nil, "", nil, nil, false, 0, nil)
 	if err != nil {
 		t.Fatalf("NewServer returned unexpected error: %v", err)
 	}
@@ -193,7 +215,7 @@ func newTestServerInterviewDisabled(t *testing.T, pipeline Answerer, sessions Se
 // newTestServerWithTurnstile builds a *Server under test with the given Turnstile verifier.
 func newTestServerWithTurnstile(t *testing.T, pipeline Answerer, sessions SessionRepository, ts TurnstileVerifier) *Server {
 	t.Helper()
-	srv, err := NewServer(pipeline, sessions, nil, ts, "test-site-key", nil, nil, true, nil)
+	srv, err := NewServer(pipeline, sessions, nil, ts, "test-site-key", nil, nil, true, 0, nil)
 	if err != nil {
 		t.Fatalf("NewServer returned unexpected error: %v", err)
 	}
@@ -431,6 +453,34 @@ func TestHandleMessages_ListMessagesFails(t *testing.T) {
 
 	if rr.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want %d", rr.Code, http.StatusInternalServerError)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestHandleMessages_LoadShed
+// ---------------------------------------------------------------------------
+
+// TestHandleMessages_LoadShed verifies that when the DB read blocks past the quick
+// deadline (a saturated pool), GET /messages sheds a 503 with a Retry-After hint
+// rather than hanging or returning 500.
+func TestHandleMessages_LoadShed(t *testing.T) {
+	t.Parallel()
+
+	sessions := &stubSessions{blockReads: true}
+	srv := newTestServer(t, &stubPipeline{}, sessions)
+	srv.quickDBTimeout = 25 * time.Millisecond // fire the deadline fast
+
+	req := httptest.NewRequest(http.MethodGet, "/messages", nil)
+	req.Header.Set(sessionHeader, validSessionFixture)
+	rr := httptest.NewRecorder()
+
+	srv.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d (load shed)", rr.Code, http.StatusServiceUnavailable)
+	}
+	if rr.Header().Get("Retry-After") == "" {
+		t.Error("a load-shed 503 must carry a Retry-After header")
 	}
 }
 
@@ -752,6 +802,49 @@ func TestHandleChat_CreateSessionFails(t *testing.T) {
 
 	if rr.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want %d", rr.Code, http.StatusInternalServerError)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestHandleChat_LoadShed_BeforeSSE
+// ---------------------------------------------------------------------------
+
+// TestHandleChat_LoadShed_BeforeSSE verifies that when a pre-stream DB op blocks past
+// the quick deadline (saturated pool), POST /chat sheds a clean HTTP 503 with a
+// Retry-After header BEFORE any SSE frame is written, and never reaches the pipeline
+// or persists any turn.
+func TestHandleChat_LoadShed_BeforeSSE(t *testing.T) {
+	t.Parallel()
+
+	sessions := &stubSessions{blockReads: true}
+	pipeline := &stubPipeline{tokens: []string{"hi"}}
+	srv := newTestServer(t, pipeline, sessions)
+	srv.quickDBTimeout = 25 * time.Millisecond
+
+	form := url.Values{}
+	form.Set("question", "what is SRE?")
+	req := httptest.NewRequest(http.MethodPost, "/chat", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set(sessionHeader, validSessionFixture)
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d (load shed before SSE)", rr.Code, http.StatusServiceUnavailable)
+	}
+	if rr.Header().Get("Retry-After") == "" {
+		t.Error("a load-shed 503 must carry a Retry-After header")
+	}
+	// A clean HTTP 503 — not a 200 SSE stream carrying an error frame.
+	if strings.Contains(rr.Body.String(), "event:") {
+		t.Errorf("shed must not emit any SSE frame; got body:\n%s", rr.Body.String())
+	}
+	if pipeline.answerCalls != 0 {
+		t.Errorf("Answer called %d time(s), want 0 on a shed", pipeline.answerCalls)
+	}
+	if len(sessions.appended) != 0 {
+		t.Errorf("no turns may be persisted on a shed; got %d", len(sessions.appended))
 	}
 }
 

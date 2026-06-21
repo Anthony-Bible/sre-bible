@@ -7,6 +7,7 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/Anthony-Bible/sre-bible/internal/rag"
 	"github.com/Anthony-Bible/sre-bible/internal/ratelimit"
@@ -14,6 +15,17 @@ import (
 
 //go:embed templates
 var templateFS embed.FS
+
+// DefaultQuickDBTimeoutMS is the default quick-DB-phase deadline in milliseconds. It is
+// the single source of truth shared by the NewServer fallback (below) and the
+// DB_QUICK_TIMEOUT_MS env default in cmd/server, so the two cannot drift.
+const DefaultQuickDBTimeoutMS = 2500
+
+// defaultQuickDBTimeout bounds the per-request "quick" DB phase (session-state reads,
+// history loads, session creation). It is deliberately shorter than the DB-side
+// statement_timeout (db.NewPool, 5s) so that under pool saturation the context deadline
+// fires first and the request sheds a 503 rather than queuing on connection acquisition.
+const defaultQuickDBTimeout = DefaultQuickDBTimeoutMS * time.Millisecond
 
 // Answerer is the port for streaming answers. Satisfied by *rag.Pipeline.
 type Answerer interface {
@@ -89,6 +101,7 @@ type Server struct {
 	interviewEnabled bool
 	suggestLimiter   *ratelimit.Limiter
 	chatLimiter      *ratelimit.Limiter
+	quickDBTimeout   time.Duration
 	templates        *template.Template
 	log              *slog.Logger
 	mux              *http.ServeMux
@@ -113,10 +126,15 @@ func defaultSuggestedQuestions() []string {
 // /chat; the two endpoints have independent budgets. A nil limiter disables
 // throttling for that endpoint (tests, local dev). interviewEnabled gates
 // Interview Mode: when false the backend never activates it and the frontend
-// hides the /interview command and HUD.
-func NewServer(pipeline Answerer, sessions SessionRepository, pinger Pinger, turnstile TurnstileVerifier, turnstileSiteKey string, suggestLimiter *ratelimit.Limiter, chatLimiter *ratelimit.Limiter, interviewEnabled bool, log *slog.Logger) (*Server, error) {
+// hides the /interview command and HUD. quickDBTimeout bounds the per-request
+// quick-DB phase so a saturated pool sheds 503; a non-positive value falls back
+// to defaultQuickDBTimeout.
+func NewServer(pipeline Answerer, sessions SessionRepository, pinger Pinger, turnstile TurnstileVerifier, turnstileSiteKey string, suggestLimiter *ratelimit.Limiter, chatLimiter *ratelimit.Limiter, interviewEnabled bool, quickDBTimeout time.Duration, log *slog.Logger) (*Server, error) {
 	if log == nil {
 		log = slog.Default()
+	}
+	if quickDBTimeout <= 0 {
+		quickDBTimeout = defaultQuickDBTimeout
 	}
 
 	t, err := template.New("").ParseFS(templateFS, "templates/*.html")
@@ -134,6 +152,7 @@ func NewServer(pipeline Answerer, sessions SessionRepository, pinger Pinger, tur
 		interviewEnabled: interviewEnabled,
 		suggestLimiter:   suggestLimiter,
 		chatLimiter:      chatLimiter,
+		quickDBTimeout:   quickDBTimeout,
 		templates:        t,
 		log:              log,
 		mux:              mux,

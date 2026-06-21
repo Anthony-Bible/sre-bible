@@ -20,7 +20,7 @@ func (p *stubPinger) Ping(_ context.Context) error {
 // newTestServerWithPinger builds a *Server under test with a pinger set.
 func newTestServerWithPinger(t *testing.T, pinger Pinger) *Server {
 	t.Helper()
-	srv, err := NewServer(&stubPipeline{}, &stubSessions{}, pinger, nil, "", nil, nil, false, nil)
+	srv, err := NewServer(&stubPipeline{}, &stubSessions{}, pinger, nil, "", nil, nil, false, 0, nil)
 	if err != nil {
 		t.Fatalf("NewServer returned unexpected error: %v", err)
 	}
