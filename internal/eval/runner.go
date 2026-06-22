@@ -93,13 +93,15 @@ func (r *Runner) Run(ctx context.Context, c GoldenCase) Result {
 		toolCalls = append(toolCalls, toolName)
 	}
 
+	matcher := rag.NewMatcher(r.embedder, rec)
+
 	pipe := rag.NewPipeline(
 		r.embedder,
 		rec,
 		r.generator,
 		r.lister,
 		r.fetcher,
-		nil, // matcher — not used in eval
+		matcher,
 		nil, // emailerFor — not used in eval
 		r.k, // 0 → rag default (top-k=8); sweep overrides via WithRunnerK
 		r.log,
@@ -196,9 +198,13 @@ func (r *Runner) Score(ctx context.Context, result Result) ScoredResult {
 	// check-light categories (e.g. contact_flow, which only has must-not-contain),
 	// silently inflating that gate. Fail it visibly instead.
 	if result.Error != nil {
+		// Leave the deterministic-assertion booleans at their zero value (false)
+		// and CitationScore at -1: an errored run has no answer to score, and the
+		// report's hard gate reads these false booleans as a violation, so the
+		// category flunks visibly rather than the error being averaged away.
 		return ScoredResult{
 			Result: result,
-			Score:  ScoreDetail{RecallScore: -1, GroundScore: -1, JudgeSkipped: true},
+			Score:  ScoreDetail{RecallScore: -1, CitationScore: -1, GroundScore: -1, JudgeSkipped: true},
 			Pass:   false,
 			Notes:  "pipeline error: " + result.Error.Error(),
 		}
@@ -207,7 +213,9 @@ func (r *Runner) Score(ctx context.Context, result Result) ScoredResult {
 	recallScore := ScoreRecall(c.ExpectedSourceNames, result.RetrievedChunks)
 	refusalPass := r.refusalCorrect(ctx, c, result.Answer)
 	mustNotPass := MustNotContainPass(result.Answer, c.MustNotContain)
+	mustContainPass := MustContainPass(result.Answer, c.MustContain)
 	toolCallsOK := ToolCallsPresent(c.ExpectedToolCalls, result.ToolCallsSeen)
+	citationScore := ScoreCitations(c.ExpectedCitations, result.Citations)
 
 	groundScore := float64(-1)
 	judgeSkipped := true
@@ -230,8 +238,11 @@ func (r *Runner) Score(ctx context.Context, result Result) ScoredResult {
 	// Determine pass: all applicable checks must pass.
 	// RecallScore of -1 means unchecked (skip gate). Otherwise must be >= 0.5.
 	recallOK := recallScore < 0 || recallScore >= 0.5
+	// CitationScore of -1 means the case declared no expected citations (skip).
+	// Otherwise it must clear the majority bar (mirrors the recall floor).
+	citationOK := citationScore < 0 || citationScore >= citationPassFraction
 
-	pass := refusalPass && mustNotPass && toolCallsOK && recallOK
+	pass := refusalPass && mustNotPass && mustContainPass && toolCallsOK && recallOK && citationOK
 
 	// Build human-readable failure notes.
 	var failures []string
@@ -241,22 +252,31 @@ func (r *Runner) Score(ctx context.Context, result Result) ScoredResult {
 	if !mustNotPass {
 		failures = append(failures, "must-not-contain violated")
 	}
+	if !mustContainPass {
+		failures = append(failures, "must-contain missing")
+	}
 	if !toolCallsOK {
 		failures = append(failures, "required tool calls not seen")
 	}
 	if !recallOK {
 		failures = append(failures, fmt.Sprintf("recall %.2f < 0.50", recallScore))
 	}
+	if !citationOK {
+		failures = append(failures, fmt.Sprintf("citations %.2f < %.2f", citationScore, citationPassFraction))
+	}
 	notes := strings.Join(failures, "; ")
 
 	return ScoredResult{
 		Result: result,
 		Score: ScoreDetail{
-			RecallScore:  recallScore,
-			RefusalPass:  refusalPass,
-			MustNotPass:  mustNotPass,
-			GroundScore:  groundScore,
-			JudgeSkipped: judgeSkipped,
+			RecallScore:     recallScore,
+			RefusalPass:     refusalPass,
+			MustNotPass:     mustNotPass,
+			MustContainPass: mustContainPass,
+			ToolCallsPass:   toolCallsOK,
+			CitationScore:   citationScore,
+			GroundScore:     groundScore,
+			JudgeSkipped:    judgeSkipped,
 		},
 		Pass:  pass,
 		Notes: notes,

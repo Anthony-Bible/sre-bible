@@ -127,9 +127,13 @@ func TestScoreFor(t *testing.T) {
 	reports := []CategoryReport{
 		{Category: CategoryGroundedFactual, AvgScore: 0.91},
 		{Category: CategoryRefusal, AvgScore: 1.0},
+		{Category: CategoryToolFlow, AvgScore: 1.0},
 	}
 	if got := ScoreFor(reports, CategoryGroundedFactual); !almostEqual(got, 0.91) {
 		t.Errorf("ScoreFor(grounded) = %v; want 0.91", got)
+	}
+	if got := ScoreFor(reports, CategoryToolFlow); !almostEqual(got, 1.0) {
+		t.Errorf("ScoreFor(tool_flow) = %v; want 1.0", got)
 	}
 	if got := ScoreFor(reports, CategoryContactFlow); got != 0 {
 		t.Errorf("ScoreFor(absent category) = %v; want 0", got)
@@ -142,12 +146,12 @@ func TestFormatSweepTable(t *testing.T) {
 	rows := []SweepRow{
 		{
 			Label: "baseline", Target: 1000, HardCap: 1200, Overlap: 200, K: 8,
-			Groundedness: 0.912, Recall: 1.0, Refusal: 1.0, ContactFlow: 1.0,
+			Groundedness: 0.912, Recall: 1.0, Refusal: 1.0, ContactFlow: 1.0, ToolFlow: 1.0,
 			MeanRank: 1.25, MeanCtxChars: 4200, ChunkCount: 40, MedianChunk: 980, P90Chunk: 1150,
 		},
 		{
 			Label: "smaller", Target: 700, HardCap: 900, Overlap: 150, K: 12,
-			Groundedness: 0.880, Recall: 1.0, Refusal: 1.0, ContactFlow: 1.0,
+			Groundedness: 0.880, Recall: 1.0, Refusal: 1.0, ContactFlow: 1.0, ToolFlow: 1.0,
 			MeanRank: 1.50, MeanCtxChars: 5600, ChunkCount: 58, MedianChunk: 690, P90Chunk: 860,
 		},
 	}
@@ -160,6 +164,9 @@ func TestFormatSweepTable(t *testing.T) {
 	}
 	if !strings.Contains(lines[0], "config") || !strings.Contains(lines[0], "mean_rank") {
 		t.Errorf("header row missing expected columns: %q", lines[0])
+	}
+	if !strings.Contains(lines[0], "tool_flow") {
+		t.Errorf("header row missing tool_flow column: %q", lines[0])
 	}
 	if !strings.Contains(out, "| baseline |") || !strings.Contains(out, "| smaller |") {
 		t.Errorf("table missing a config label row:\n%s", out)
@@ -175,13 +182,13 @@ func TestRecommendConfig(t *testing.T) {
 
 	const tol = 0.05
 
-	baseline := SweepRow{Label: "baseline", Groundedness: 0.90, Recall: 1.0, Refusal: 1.0, ContactFlow: 1.0}
+	baseline := SweepRow{Label: "baseline", Groundedness: 0.90, Recall: 1.0, Refusal: 1.0, ContactFlow: 1.0, ToolFlow: 1.0}
 
 	t.Run("baseline wins when candidates within noise", func(t *testing.T) {
 		t.Parallel()
 		rows := []SweepRow{
 			baseline,
-			{Label: "smaller", Groundedness: 0.92, Recall: 1.0, Refusal: 1.0, ContactFlow: 1.0}, // +0.02 < tol
+			{Label: "smaller", Groundedness: 0.92, Recall: 1.0, Refusal: 1.0, ContactFlow: 1.0, ToolFlow: 1.0}, // +0.02 < tol
 		}
 		got, rationale := RecommendConfig(rows, "baseline", tol)
 		if got.Label != "baseline" {
@@ -196,7 +203,7 @@ func TestRecommendConfig(t *testing.T) {
 		t.Parallel()
 		rows := []SweepRow{
 			baseline,
-			{Label: "larger", Groundedness: 0.98, Recall: 1.0, Refusal: 1.0, ContactFlow: 1.0}, // +0.08 > tol
+			{Label: "larger", Groundedness: 0.98, Recall: 1.0, Refusal: 1.0, ContactFlow: 1.0, ToolFlow: 1.0}, // +0.08 > tol
 		}
 		got, rationale := RecommendConfig(rows, "baseline", tol)
 		if got.Label != "larger" {
@@ -212,11 +219,24 @@ func TestRecommendConfig(t *testing.T) {
 		rows := []SweepRow{
 			baseline,
 			// Higher groundedness, but recall craters below baseline-tol → rejected.
-			{Label: "risky", Groundedness: 0.99, Recall: 0.70, Refusal: 1.0, ContactFlow: 1.0},
+			{Label: "risky", Groundedness: 0.99, Recall: 0.70, Refusal: 1.0, ContactFlow: 1.0, ToolFlow: 1.0},
 		}
 		got, _ := RecommendConfig(rows, "baseline", tol)
 		if got.Label != "baseline" {
 			t.Errorf("recommended %q; want baseline (candidate regressed recall guardrail)", got.Label)
+		}
+	})
+
+	t.Run("tool_flow regression disqualifies a higher-groundedness config", func(t *testing.T) {
+		t.Parallel()
+		rows := []SweepRow{
+			baseline,
+			// Higher groundedness, but tool_flow craters below baseline-tol → rejected.
+			{Label: "drops-tool", Groundedness: 0.99, Recall: 1.0, Refusal: 1.0, ContactFlow: 1.0, ToolFlow: 0.70},
+		}
+		got, _ := RecommendConfig(rows, "baseline", tol)
+		if got.Label != "baseline" {
+			t.Errorf("recommended %q; want baseline (candidate regressed tool_flow guardrail)", got.Label)
 		}
 	})
 
