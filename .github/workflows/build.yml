@@ -4,8 +4,6 @@ on:
   push:
     branches:
       - main
-    paths-ignore:
-      - 'deploy/deployment.yaml'
   pull_request:
   workflow_dispatch:
 
@@ -165,8 +163,16 @@ jobs:
           git config user.name "github-actions[bot]"
           git add deploy/deployment.yaml
           git commit -m "chore(deploy): update image digest to ${VERSION}" || echo "No changes to commit"
-      - name: Push manifest
+      # Push the rendered manifest to the CD-managed release branch that ArgoCD
+      # tracks (deploy/argocd/application.yaml: targetRevision: deploy-state) — NOT
+      # to `main`. `main` is a protected branch with required status checks the
+      # default GITHUB_TOKEN cannot satisfy, so pushing the digest bump there is
+      # rejected (GH006). The release branch is unprotected, so the default token
+      # works and `main` stays clean. force:true because deploy-state is rebuilt
+      # as "latest main + digest" on every deploy (its history is disposable).
+      - name: Push manifest to release branch
         uses: ad-m/github-push-action@master
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          branch: main
+          branch: deploy-state
+          force: true
