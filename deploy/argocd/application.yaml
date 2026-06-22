@@ -7,7 +7,10 @@ spec:
   project: default
   source:
     repoURL: https://github.com/Anthony-Bible/sre-bible
-    targetRevision: main
+    # Tracks the CD-managed release branch, not `main`. CI renders `main` + the
+    # resolved image digest and force-pushes it to `deploy-state`, keeping `main`
+    # protected and free of automated digest-bump commits. See .github/workflows/build.yml.
+    targetRevision: deploy-state
     path: deploy
     directory:
       exclude: "argocd/**"
