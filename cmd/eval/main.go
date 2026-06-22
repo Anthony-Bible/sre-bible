@@ -58,6 +58,7 @@ func run(log *slog.Logger) error {
 		Recall:       parseThreshold("EVAL_THRESHOLD_RECALL", eval.DefaultThresholds.Recall),
 		Refusal:      parseThreshold("EVAL_THRESHOLD_REFUSAL", eval.DefaultThresholds.Refusal),
 		ContactFlow:  parseThreshold("EVAL_THRESHOLD_CONTACT_FLOW", eval.DefaultThresholds.ContactFlow),
+		ToolFlow:     parseThreshold("EVAL_THRESHOLD_TOOL_FLOW", eval.DefaultThresholds.ToolFlow),
 	}
 
 	ctx := context.Background()
@@ -113,6 +114,9 @@ func run(log *slog.Logger) error {
 			"recall", sr.Score.RecallScore,
 			"refusal_pass", sr.Score.RefusalPass,
 			"must_not_pass", sr.Score.MustNotPass,
+			"must_contain_pass", sr.Score.MustContainPass,
+			"tool_calls_pass", sr.Score.ToolCallsPass,
+			"citation_score", sr.Score.CitationScore,
 			"ground_score", sr.Score.GroundScore,
 			"notes", sr.Notes,
 		)

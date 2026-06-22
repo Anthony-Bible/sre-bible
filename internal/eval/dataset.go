@@ -14,6 +14,7 @@ const (
 	CategoryRetrievalCheck  Category = "retrieval_check"
 	CategoryRefusal         Category = "refusal"
 	CategoryContactFlow     Category = "contact_flow"
+	CategoryToolFlow        Category = "tool_flow"
 )
 
 // GoldenCase is a single labelled example used for evaluation.
@@ -22,7 +23,9 @@ type GoldenCase struct {
 	Category            Category `json:"category"`
 	Question            string   `json:"question"`
 	ExpectedSourceNames []string `json:"expected_source_names,omitempty"`
+	ExpectedCitations   []string `json:"expected_citations,omitempty"`
 	MustNotContain      []string `json:"must_not_contain,omitempty"`
+	MustContain         []string `json:"must_contain,omitempty"`
 	ExpectedRefusal     bool     `json:"expected_refusal,omitempty"`
 	ExpectedToolCalls   []string `json:"expected_tool_calls,omitempty"`
 	JudgeRubric         string   `json:"judge_rubric,omitempty"`
@@ -50,12 +53,21 @@ type Result struct {
 }
 
 // ScoreDetail holds the individual scoring signals for an EvalResult.
+//
+// MustNotPass, MustContainPass, and ToolCallsPass are the deterministic
+// assertions the hard gate (see report.go) keys on: each is true when the case
+// declares no such assertion, so an absent assertion never trips the gate.
+// CitationScore mirrors RecallScore's sentinel convention — -1 means the case
+// declared no expected citations (skip) and the hard gate ignores it.
 type ScoreDetail struct {
-	RecallScore  float64 `json:"recall_score"`
-	RefusalPass  bool    `json:"refusal_pass"`
-	MustNotPass  bool    `json:"must_not_pass"`
-	GroundScore  float64 `json:"ground_score"`
-	JudgeSkipped bool    `json:"judge_skipped"`
+	RecallScore     float64 `json:"recall_score"`
+	RefusalPass     bool    `json:"refusal_pass"`
+	MustNotPass     bool    `json:"must_not_pass"`
+	MustContainPass bool    `json:"must_contain_pass"`
+	ToolCallsPass   bool    `json:"tool_calls_pass"`
+	CitationScore   float64 `json:"citation_score"`
+	GroundScore     float64 `json:"ground_score"`
+	JudgeSkipped    bool    `json:"judge_skipped"`
 }
 
 // ScoredResult pairs a Result with its computed score.
@@ -89,7 +101,7 @@ func LoadDataset(path string) (*Dataset, error) {
 	// mis-categorised case is never evaluated and its absence raises no signal.
 	for i, c := range ds.Cases {
 		switch c.Category {
-		case CategoryGroundedFactual, CategoryRetrievalCheck, CategoryRefusal, CategoryContactFlow:
+		case CategoryGroundedFactual, CategoryRetrievalCheck, CategoryRefusal, CategoryContactFlow, CategoryToolFlow:
 			// valid
 		default:
 			return nil, fmt.Errorf("LoadDataset: case %d (id %q) has unknown category %q", i, c.ID, c.Category)

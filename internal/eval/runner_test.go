@@ -364,41 +364,301 @@ func TestRunner_Score_SkipsJudgeOnError(t *testing.T) {
 	}
 }
 
+func TestRunner_Score_FailsWhenMustContainMissing(t *testing.T) {
+	t.Parallel()
+
+	// A contact_flow case that requires the answer to mention "linkedin". The
+	// answer omits it, so MustContainPass is false and the case fails — even
+	// though no other assertion is violated.
+	result := eval.Result{
+		Case: eval.GoldenCase{
+			ID:          "tc-must-contain",
+			Category:    eval.CategoryContactFlow,
+			Question:    "How do I reach Anthony?",
+			MustContain: []string{"linkedin"},
+		},
+		Answer: "You can send him a message through the website.",
+	}
+
+	r := newRunner(stubSearcher{}, &stubGenerator{}, nil)
+	sr := r.Score(context.Background(), result)
+
+	if sr.Score.MustContainPass {
+		t.Error("MustContainPass should be false when a required substring is absent")
+	}
+	if sr.Pass {
+		t.Error("Pass should be false when must-contain check fails")
+	}
+}
+
+func TestRunner_Score_PassesWhenMustContainPresent(t *testing.T) {
+	t.Parallel()
+
+	result := eval.Result{
+		Case: eval.GoldenCase{
+			ID:          "tc-must-contain-ok",
+			Category:    eval.CategoryContactFlow,
+			Question:    "How do I reach Anthony?",
+			MustContain: []string{"linkedin"},
+		},
+		Answer: "The best way is via LinkedIn at linkedin.com/in/anthonybible/.",
+	}
+
+	r := newRunner(stubSearcher{}, &stubGenerator{}, nil)
+	sr := r.Score(context.Background(), result)
+
+	if !sr.Score.MustContainPass {
+		t.Error("MustContainPass should be true when all required substrings are present (case-insensitive)")
+	}
+	if !sr.Pass {
+		t.Errorf("Pass should be true; Notes: %s", sr.Notes)
+	}
+}
+
+func TestRunner_Score_CitationScorePopulatedAndPasses(t *testing.T) {
+	t.Parallel()
+
+	// The case declares an expected citation that the pipeline actually returned,
+	// so CitationScore is 1.0 (>= the majority bar) and the case passes.
+	result := eval.Result{
+		Case: eval.GoldenCase{
+			ID:                "tc-citation-ok",
+			Category:          eval.CategoryRetrievalCheck,
+			Question:          "What is Anthony's toil philosophy?",
+			ExpectedCitations: []string{"about_fixture.txt"},
+		},
+		Answer:    "He automates repeated toil.",
+		Citations: []string{"about_fixture.txt", "resume_fixture.txt"},
+	}
+
+	r := newRunner(stubSearcher{}, &stubGenerator{}, nil)
+	sr := r.Score(context.Background(), result)
+
+	if sr.Score.CitationScore != 1.0 {
+		t.Errorf("CitationScore: got %v, want 1.0", sr.Score.CitationScore)
+	}
+	if !sr.Pass {
+		t.Errorf("Pass should be true when the expected citation is present; Notes: %s", sr.Notes)
+	}
+}
+
+func TestRunner_Score_FailsWhenExpectedCitationMissing(t *testing.T) {
+	t.Parallel()
+
+	// Expected citation is absent from the returned set → CitationScore 0.0,
+	// below the 0.5 majority bar, so the case fails.
+	result := eval.Result{
+		Case: eval.GoldenCase{
+			ID:                "tc-citation-miss",
+			Category:          eval.CategoryRetrievalCheck,
+			Question:          "What is Anthony's toil philosophy?",
+			ExpectedCitations: []string{"about_fixture.txt"},
+		},
+		Answer:    "He automates repeated toil.",
+		Citations: []string{"resume_fixture.txt"},
+	}
+
+	r := newRunner(stubSearcher{}, &stubGenerator{}, nil)
+	sr := r.Score(context.Background(), result)
+
+	if sr.Score.CitationScore != 0.0 {
+		t.Errorf("CitationScore: got %v, want 0.0", sr.Score.CitationScore)
+	}
+	if sr.Pass {
+		t.Error("Pass should be false when the expected citation is missing")
+	}
+}
+
+func TestRunner_Score_CitationScoreSkippedWhenNoneExpected(t *testing.T) {
+	t.Parallel()
+
+	// No expected citations declared → CitationScore -1 (skip); the absence of
+	// citations never trips the gate.
+	result := eval.Result{
+		Case: eval.GoldenCase{
+			ID:       "tc-citation-skip",
+			Category: eval.CategoryGroundedFactual,
+			Question: "What did Anthony do?",
+		},
+		Answer:    "He built an agentic RCA system.",
+		Citations: []string{},
+	}
+
+	r := newRunner(stubSearcher{}, &stubGenerator{}, nil)
+	sr := r.Score(context.Background(), result)
+
+	if sr.Score.CitationScore != -1 {
+		t.Errorf("CitationScore: got %v, want -1 (skip)", sr.Score.CitationScore)
+	}
+	if !sr.Pass {
+		t.Errorf("Pass should be true when no citations are expected; Notes: %s", sr.Notes)
+	}
+}
+
+func TestRunner_Score_ToolCallsPassReflectsSeenTools(t *testing.T) {
+	t.Parallel()
+
+	// tool_flow-style case: the expected tool was invoked, so ToolCallsPass is
+	// true and the deterministic gate is satisfied.
+	result := eval.Result{
+		Case: eval.GoldenCase{
+			ID:                "tc-tool-flow",
+			Category:          eval.CategoryToolFlow,
+			Question:          "Match this job description.",
+			ExpectedToolCalls: []string{"match_job_description"},
+		},
+		Answer:        "Here is the fit scorecard.",
+		ToolCallsSeen: []string{"match_job_description"},
+	}
+
+	r := newRunner(stubSearcher{}, &stubGenerator{}, nil)
+	sr := r.Score(context.Background(), result)
+
+	if !sr.Score.ToolCallsPass {
+		t.Error("ToolCallsPass should be true when the expected tool was invoked")
+	}
+	if !sr.Pass {
+		t.Errorf("Pass should be true; Notes: %s", sr.Notes)
+	}
+}
+
+func TestRunner_Score_FailsWhenExpectedToolCallMissing(t *testing.T) {
+	t.Parallel()
+
+	result := eval.Result{
+		Case: eval.GoldenCase{
+			ID:                "tc-tool-flow-miss",
+			Category:          eval.CategoryToolFlow,
+			Question:          "Match this job description.",
+			ExpectedToolCalls: []string{"match_job_description"},
+		},
+		Answer:        "Anthony is a great fit.",
+		ToolCallsSeen: []string{},
+	}
+
+	r := newRunner(stubSearcher{}, &stubGenerator{}, nil)
+	sr := r.Score(context.Background(), result)
+
+	if sr.Score.ToolCallsPass {
+		t.Error("ToolCallsPass should be false when the expected tool was not invoked")
+	}
+	if sr.Pass {
+		t.Error("Pass should be false when a required tool call is missing")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Report tests
 // ---------------------------------------------------------------------------
 
+// cleanScore is a ScoreDetail with every deterministic-assertion gate satisfied:
+// the must-pass booleans true and CitationScore -1 (no expected citations). A
+// report test builds on this so the hard gate doesn't flunk an otherwise-passing
+// category — the zero value of CitationScore (0.0) would otherwise read as a
+// citation regression (< 0.5) and trip the gate.
+func cleanScore() eval.ScoreDetail {
+	return eval.ScoreDetail{
+		MustNotPass:     true,
+		MustContainPass: true,
+		ToolCallsPass:   true,
+		CitationScore:   -1,
+	}
+}
+
 func TestReport_AllPassWhenAllAboveThreshold(t *testing.T) {
 	t.Parallel()
 
-	// Build one passing ScoredResult per category, each with a score above default thresholds.
+	// One passing ScoredResult per category, each with a soft-gate score above
+	// default thresholds and no hard-gate violation.
+	grounded := cleanScore()
+	grounded.GroundScore = 0.95
+	retrieval := cleanScore()
+	retrieval.RecallScore = 0.90
+	refusal := cleanScore()
+	refusal.RefusalPass = true
+	contact := cleanScore()
+	contact.RefusalPass = true
+
 	results := []eval.ScoredResult{
-		{
-			Result: eval.Result{Case: eval.GoldenCase{Category: eval.CategoryGroundedFactual}},
-			Score:  eval.ScoreDetail{GroundScore: 0.95, JudgeSkipped: false},
-			Pass:   true,
-		},
-		{
-			Result: eval.Result{Case: eval.GoldenCase{Category: eval.CategoryRetrievalCheck}},
-			Score:  eval.ScoreDetail{RecallScore: 0.90},
-			Pass:   true,
-		},
-		{
-			Result: eval.Result{Case: eval.GoldenCase{Category: eval.CategoryRefusal}},
-			Score:  eval.ScoreDetail{RefusalPass: true, MustNotPass: true},
-			Pass:   true,
-		},
-		{
-			Result: eval.Result{Case: eval.GoldenCase{Category: eval.CategoryContactFlow}},
-			Score:  eval.ScoreDetail{MustNotPass: true, RefusalPass: true},
-			Pass:   true,
-		},
+		{Result: eval.Result{Case: eval.GoldenCase{Category: eval.CategoryGroundedFactual}}, Score: grounded, Pass: true},
+		{Result: eval.Result{Case: eval.GoldenCase{Category: eval.CategoryRetrievalCheck}}, Score: retrieval, Pass: true},
+		{Result: eval.Result{Case: eval.GoldenCase{Category: eval.CategoryRefusal}}, Score: refusal, Pass: true},
+		{Result: eval.Result{Case: eval.GoldenCase{Category: eval.CategoryContactFlow}}, Score: contact, Pass: true},
+		{Result: eval.Result{Case: eval.GoldenCase{Category: eval.CategoryToolFlow}}, Score: cleanScore(), Pass: true},
 	}
 
 	reports := eval.Aggregate(results, eval.DefaultThresholds)
 	ok := eval.Report(reports, slog.Default())
 	if !ok {
 		t.Error("Report should return true when all categories meet their gate")
+	}
+}
+
+func TestReport_HardFailFlunksCategoryDespiteHighAverage(t *testing.T) {
+	t.Parallel()
+
+	// Two grounded_factual cases, both with judge scores well above the
+	// groundedness threshold — so the soft (average) gate is satisfied. But one
+	// case violated a deterministic assertion (a must_not_contain leak). The hard
+	// gate must flunk the whole category regardless of the high average.
+	good := cleanScore()
+	good.GroundScore = 0.99
+	leaked := cleanScore()
+	leaked.GroundScore = 0.99
+	leaked.MustNotPass = false // e.g. a PII string slipped through
+
+	results := []eval.ScoredResult{
+		{Result: eval.Result{Case: eval.GoldenCase{Category: eval.CategoryGroundedFactual}}, Score: good, Pass: true},
+		{Result: eval.Result{Case: eval.GoldenCase{Category: eval.CategoryGroundedFactual}}, Score: leaked, Pass: false},
+	}
+
+	reports := eval.Aggregate(results, eval.DefaultThresholds)
+	if len(reports) == 0 {
+		t.Fatal("expected at least one category report")
+	}
+	gf := reports[0]
+	if gf.Category != eval.CategoryGroundedFactual {
+		t.Fatalf("first report category = %q, want grounded_factual", gf.Category)
+	}
+	if gf.AvgScore < gf.Threshold {
+		t.Fatalf("precondition: average %.2f should clear threshold %.2f so only the hard gate can flunk it", gf.AvgScore, gf.Threshold)
+	}
+	if !gf.HardFail {
+		t.Error("HardFail should be true when a case violates a deterministic assertion")
+	}
+	if gf.MeetsGate {
+		t.Error("MeetsGate should be false: a hard-fail flunks the category even with a high average")
+	}
+
+	if eval.Report(reports, slog.Default()) {
+		t.Error("Report should return false when a category hard-fails")
+	}
+}
+
+func TestReport_CitationRegressionHardFails(t *testing.T) {
+	t.Parallel()
+
+	// A retrieval_check case whose recall clears the soft gate, but whose expected
+	// citation was missed (CitationScore below the majority bar). The citation
+	// shortfall is a hard-gate violation, so the category fails.
+	s := cleanScore()
+	s.RecallScore = 1.0
+	s.CitationScore = 0.0 // expected a citation, got none of it
+
+	results := []eval.ScoredResult{
+		{Result: eval.Result{Case: eval.GoldenCase{Category: eval.CategoryRetrievalCheck}}, Score: s, Pass: false},
+	}
+
+	reports := eval.Aggregate(results, eval.DefaultThresholds)
+	rc := reports[1] // retrieval_check is second in the fixed order
+	if rc.Category != eval.CategoryRetrievalCheck {
+		t.Fatalf("second report category = %q, want retrieval_check", rc.Category)
+	}
+	if !rc.HardFail {
+		t.Error("HardFail should be true when a citation regression is present")
+	}
+	if rc.MeetsGate {
+		t.Error("MeetsGate should be false on a citation hard-fail")
 	}
 }
 

@@ -16,17 +16,34 @@ Introduce a golden-dataset eval harness (`cmd/eval`, `internal/eval/`) that runs
 | Dimension | Method | What it measures |
 |---|---|---|
 | `grounded_factual` | LLM judge (Gemini, temp=0) | Whether the answer is grounded in retrieved context and factually consistent with it |
-| `retrieval_check` | Recall@k assertion | Whether expected source chunks appear in the retrieved set for a given question |
+| `retrieval_check` | Recall@k + citation-accuracy assertions | Whether expected source chunks appear in the retrieved set, and whether the answer's returned citations include the expected sources |
 | `refusal` | LLM judge (Gemini, temp=0) with keyword-heuristic fallback | Whether out-of-scope questions are correctly refused rather than hallucinated |
-| `contact_flow` | Behavioral pass/fail | Whether contact-email tool invocation follows the required confirmation flow |
+| `contact_flow` | Behavioral pass/fail | Whether contact-email tool invocation follows the required confirmation flow, the answer points the user at the real contact channel (`must_contain`), and no PII leaks (`must_not_contain`) |
+| `tool_flow` | Tool-presence (`expected_tool_calls`) + recall | Whether the agent actually invokes the tool a question demands (e.g. `match_job_description` for a job-fit request), independent of how well the prose reads |
 
-Per-category pass rates are compared against configurable thresholds. The job fails if any category falls below its threshold.
+Per-category averages (judge/recall averages for the score-based categories, pass rate for the rest) are compared against configurable thresholds — the **soft gate**. The job fails if any category falls below its threshold.
+
+### The hard gate (deterministic assertions)
+
+The soft gate has a structural blind spot: it averages. For a score-based category, one case that drops a required tool call or leaks PII can be averaged back above the line by its well-scoring neighbours, so the violation never reaches any gate. Originally this is exactly what happened — the per-case deterministic assertions (`must_not_contain`, `expected_tool_calls`) were computed but only consulted for `refusal`/`contact_flow`, and discarded for the averaged categories.
+
+Every category now also carries a **hard gate** applied uniformly: a category fails outright if *any* of its cases violates an author-declared deterministic assertion — `must_not_contain`, `must_contain`, `expected_tool_calls`, or `expected_citations` — regardless of how high the average sits. Formally:
+
+```
+MeetsGate(cat) = (total == 0) || (avgScore >= threshold && !anyHardFail)
+```
+
+Each assertion is **skip-when-undeclared**: the must-pass booleans default to true when a case sets no such field, and citation score is `-1` (skip) when no citations are expected. So a case that declares no deterministic assertion can never hard-fail — the hard gate only bites on a real regression against the current (all-passing) baseline, never on a case that simply doesn't use the assertion. The recall and refusal averages keep their existing **soft** treatment (not folded into the hard gate) to avoid flaking on the residual LLM-judge variance.
+
+`expected_citations` is scored by `ScoreCitations` (a clone of recall: fraction of expected citation names present in the answer's returned citation set), and a case hard-fails when that fraction sits below the majority bar `0.5` — mirroring the recall floor. This wires citation accuracy, previously captured but never scored, into the gate.
+
+`tool_flow` is its own category so tool behaviour reports on its own line rather than hiding inside `grounded_factual`'s average. It is a pass-rate gate (threshold `0.80`, effectively must-pass at n=1) and the hard gate independently enforces its `expected_tool_calls` assertion.
 
 ### Non-determinism handling
 
 - The LLM judge runs at `temperature=0` for maximum repeatability.
 - **The agent under test also runs at `temperature=0` in eval** (production leaves it at the API default). The gate must measure regressions in behaviour, not sampling noise: at the default temperature a single borderline refusal case occasionally answers instead of refusing, and with only nine refusal cases that one flip drops the pass rate to 0.889 — below the 0.90 gate — turning the gate into a coin flip. Pinning the agent to `temperature=0` makes its answers reproducible. A small residual variance remains (the API is not perfectly deterministic even at temp=0, observed as `gf-004` scoring 0.0 vs 0.5 between runs), which the per-category averaging below absorbs.
-- Gates are set on **per-category averages**, not per-case pass/fail, to absorb the small variance that remains even at temp=0.
+- The **soft** gate is set on **per-category averages**, not per-case pass/fail, to absorb the small variance that remains even at temp=0. The **hard** gate (above) is exact and per-case — but only on deterministic assertions, which carry no judge variance, so it cannot flake.
 - If the judge API call returns an error (rate limit, transient failure), that case is marked `SKIP` rather than `FAIL` so a flaky API does not block the pipeline.
 
 ### Threshold rationale
@@ -35,12 +52,13 @@ A baseline was re-run against the ingested fixtures on 2026-06-09 (multiple runs
 
 | Category | Observed | Threshold | Margin |
 |---|---|---|---|
-| `grounded_factual` | 1.00 | 0.75 | precautionary; tolerates one of six cases regressing without flaking |
-| `retrieval_check` | 1.00 | 0.80 | catches one of four cases failing recall |
+| `grounded_factual` | 1.00 | 0.75 | precautionary; tolerates one grounded case regressing without flaking |
+| `retrieval_check` | 1.00 | 0.80 | catches one case failing recall |
 | `refusal` | 1.00 | 0.90 | catches a single missed refusal (safety-critical, kept tight) |
-| `contact_flow` | 1.00 | 0.80 | catches one of three cases (effectively requires all three) |
+| `contact_flow` | 1.00 | 0.80 | catches one case (effectively requires all) |
+| `tool_flow` | 1.00 | 0.80 | pass-rate; effectively must-pass at n=1, with the hard gate enforcing the tool call |
 
-The `retrieval_check`, `refusal`, and `contact_flow` thresholds sit **just below** their observed 1.00 baseline: low enough to absorb the residual variance a non-deterministic, LLM-judged pipeline carries even at `temperature=0`, high enough to catch a real regression. Groundedness keeps a deliberately wider precautionary margin (see below).
+The `retrieval_check`, `refusal`, `contact_flow`, and `tool_flow` thresholds sit **just below** their observed 1.00 baseline: low enough to absorb the residual variance a non-deterministic, LLM-judged pipeline carries even at `temperature=0`, high enough to catch a real regression. Groundedness keeps a deliberately wider precautionary margin (see below). These soft thresholds are now backstopped by the per-case hard gate on deterministic assertions, so a single dropped tool call, PII leak, or missed expected citation fails its category outright even if the average would otherwise clear the bar.
 
 #### Distractor documents
 
@@ -75,6 +93,7 @@ Two separate repository secrets are used so eval credentials can be scoped indep
 - **False confidence:** Passing the eval set does not guarantee correctness on arbitrary questions. The golden dataset is a finite sample; novel phrasing or topics not covered will not be caught.
 - **Prompt injection surface:** Adversarial cases in the golden set provide minimal coverage. A full red-team suite against prompt injection via ingested sources is deferred.
 - **Baseline dependency:** The thresholds are derived from the 2026-06-09 baseline run (see Threshold rationale). They are only as valid as that baseline — the fixture set (including the distractor documents), the judge model (`gemini-3.1-pro-preview`), the agent model, and the agent's pinned `temperature=0` are all inputs, so the dataset must be re-baselined whenever any of them changes, or the gate will measure against a stale bar.
+- **Pending re-baseline (case set 32 → 38):** The dataset grew from 32 to 38 cases — a new `tool_flow` category (`tf-001`, recategorized from `gf-007`) plus five new cases: an over-refusal guard (`gf-008`), a positive contact-channel assertion (`cf-004`), a citation-accuracy case (`rc-005`), and three new refusal vectors (fabricated attribution, ungrounded inference of protected attributes, cross-session leakage). These were added against the existing baseline but have **not** yet been run end-to-end against live APIs, so a fresh baseline run is required to confirm all five category gates pass on the current agent and to verify `cf-004`'s `must_contain` token (`"linkedin"`, chosen from the system prompt's mandated contact channels) matches the agent's real contact wording.
 - **Retrieval-coverage artifact:** Because the grounding judge sees only the retrieved top-k chunks rather than the full source, a factually-correct answer can in principle be scored as ungrounded when relevant detail is fragmented out of the retrieved set. This was observed on `gf-004` under the old degenerate chunker (~55 tiny chunks) and is no longer observed after the chunking fix (45e569b) reduced the resume to ~7 coherent chunks. The risk remains structural for any future source that fragments badly; a fuller fix is feeding the judge the full source for grounded_factual cases.
 - **Non-zero cost:** Approved eval runs make live API calls. Cost is low but non-zero and subject to API pricing changes. The manual-approval gate keeps this off the per-push path, but it also means the gate only runs when a reviewer remembers to approve it.
 

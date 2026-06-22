@@ -86,6 +86,149 @@ func TestScoreRecall(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// ScoreCitations
+// ---------------------------------------------------------------------------
+
+func TestScoreCitations(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		expected []string
+		actual   []string
+		want     float64
+		pass     bool // true = expected "passing" scenario, false = "failing"
+	}{
+		// --- passing cases ---
+		{
+			name:     "empty expected returns -1 (skip)",
+			expected: []string{},
+			actual:   []string{"resume.pdf"},
+			want:     -1,
+			pass:     true,
+		},
+		{
+			name:     "all expected citations present returns 1.0",
+			expected: []string{"resume.pdf", "about.txt"},
+			actual:   []string{"resume.pdf", "about.txt", "other.pdf"},
+			want:     1.0,
+			pass:     true,
+		},
+		{
+			name:     "half expected citations present returns 0.5",
+			expected: []string{"resume.pdf", "missing.pdf"},
+			actual:   []string{"resume.pdf"},
+			want:     0.5,
+			pass:     true,
+		},
+		// --- failing cases ---
+		{
+			name:     "no expected citation present returns 0.0 not -1",
+			expected: []string{"resume.pdf"},
+			actual:   []string{"other.pdf"},
+			want:     0.0,
+			pass:     false,
+		},
+		{
+			name:     "empty actual returns 0.0",
+			expected: []string{"resume.pdf"},
+			actual:   []string{},
+			want:     0.0,
+			pass:     false,
+		},
+		{
+			name:     "partial match returns fraction not 1.0",
+			expected: []string{"a.pdf", "b.pdf", "c.pdf"},
+			actual:   []string{"a.pdf"},
+			want:     1.0 / 3.0,
+			pass:     false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := ScoreCitations(tc.expected, tc.actual)
+			if got != tc.want {
+				t.Errorf("ScoreCitations(%v, %v) = %v, want %v", tc.expected, tc.actual, got, tc.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// MustContainPass
+// ---------------------------------------------------------------------------
+
+func TestMustContainPass(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		answer   string
+		required []string
+		want     bool
+		pass     bool
+	}{
+		// --- passing cases ---
+		{
+			name:     "empty required slice always passes",
+			answer:   "Anthony prefers LinkedIn for contact.",
+			required: []string{},
+			want:     true,
+			pass:     true,
+		},
+		{
+			name:     "answer contains the single required string",
+			answer:   "You can reach him via linkedin.com/in/anthonybible/.",
+			required: []string{"linkedin"},
+			want:     true,
+			pass:     true,
+		},
+		{
+			name:     "case-insensitive match of all required strings",
+			answer:   "Reach out on LinkedIn or GitHub.",
+			required: []string{"linkedin", "github"},
+			want:     true,
+			pass:     true,
+		},
+		// --- failing cases ---
+		{
+			name:     "answer missing the only required string → false",
+			answer:   "I can't share that information.",
+			required: []string{"linkedin"},
+			want:     false,
+			pass:     false,
+		},
+		{
+			name:     "answer missing one of several required strings → false",
+			answer:   "You can find him on LinkedIn.",
+			required: []string{"linkedin", "github"},
+			want:     false,
+			pass:     false,
+		},
+		{
+			name:     "empty answer with a required string → false",
+			answer:   "",
+			required: []string{"contact"},
+			want:     false,
+			pass:     false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := MustContainPass(tc.answer, tc.required)
+			if got != tc.want {
+				t.Errorf("MustContainPass(%q, %v) = %v, want %v",
+					tc.answer, tc.required, got, tc.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
 // RefusalCorrect
 // ---------------------------------------------------------------------------
 

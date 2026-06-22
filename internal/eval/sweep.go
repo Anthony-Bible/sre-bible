@@ -108,6 +108,7 @@ type SweepRow struct {
 	Recall       float64
 	Refusal      float64
 	ContactFlow  float64
+	ToolFlow     float64
 	MeanRank     float64
 	MeanCtxChars float64
 	ChunkCount   int // total chunks stored in the DB under this config
@@ -120,22 +121,22 @@ type SweepRow struct {
 // left-to-right as the knobs that produced the scores to its right.
 func FormatSweepTable(rows []SweepRow) string {
 	var b strings.Builder
-	b.WriteString("| config | target | hardCap | overlap | k | ground | recall | refusal | contact | mean_rank | mean_ctx_chars | chunks | median | p90 |\n")
-	b.WriteString("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
+	b.WriteString("| config | target | hardCap | overlap | k | ground | recall | refusal | contact | tool_flow | mean_rank | mean_ctx_chars | chunks | median | p90 |\n")
+	b.WriteString("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
 	for _, r := range rows {
-		fmt.Fprintf(&b, "| %s | %d | %d | %d | %d | %.3f | %.3f | %.3f | %.3f | %.2f | %.0f | %d | %d | %d |\n",
+		fmt.Fprintf(&b, "| %s | %d | %d | %d | %d | %.3f | %.3f | %.3f | %.3f | %.3f | %.2f | %.0f | %d | %d | %d |\n",
 			r.Label, r.Target, r.HardCap, r.Overlap, r.K,
-			r.Groundedness, r.Recall, r.Refusal, r.ContactFlow,
+			r.Groundedness, r.Recall, r.Refusal, r.ContactFlow, r.ToolFlow,
 			r.MeanRank, r.MeanCtxChars, r.ChunkCount, r.MedianChunk, r.P90Chunk)
 	}
 	return b.String()
 }
 
 // RecommendConfig picks the row with the best groundedness that does not regress
-// the recall/refusal/contact guardrails below the baseline row's values by more
-// than tol, and reports a one-line rationale. The baseline always qualifies (it
-// cannot regress against itself), so a recommendation is always returned when
-// rows is non-empty and contains baselineLabel.
+// the recall/refusal/contact/tool_flow guardrails below the baseline row's values
+// by more than tol, and reports a one-line rationale. The baseline always
+// qualifies (it cannot regress against itself), so a recommendation is always
+// returned when rows is non-empty and contains baselineLabel.
 //
 // The decision is deliberately conservative: a candidate only wins if it beats
 // baseline groundedness by more than tol (LLM-judge noise) AND holds every
@@ -162,7 +163,8 @@ func RecommendConfig(rows []SweepRow, baselineLabel string, tol float64) (SweepR
 	regresses := func(r SweepRow) bool {
 		return r.Recall < base.Recall-tol ||
 			r.Refusal < base.Refusal-tol ||
-			r.ContactFlow < base.ContactFlow-tol
+			r.ContactFlow < base.ContactFlow-tol ||
+			r.ToolFlow < base.ToolFlow-tol
 	}
 
 	best := base
@@ -181,6 +183,6 @@ func RecommendConfig(rows []SweepRow, baselineLabel string, tol float64) (SweepR
 			baselineLabel, base.Groundedness, tol)
 	}
 	return best, fmt.Sprintf(
-		"config %q improves groundedness %.3f → %.3f (+%.3f, above ±%.3f noise) without regressing recall/refusal/contact below baseline",
+		"config %q improves groundedness %.3f → %.3f (+%.3f, above ±%.3f noise) without regressing recall/refusal/contact/tool_flow below baseline",
 		best.Label, base.Groundedness, best.Groundedness, best.Groundedness-base.Groundedness, tol)
 }

@@ -393,6 +393,7 @@ func (s *sweeper) row(label string, cfg ingest.ChunkConfig, k int, scored []eval
 		Recall:       eval.ScoreFor(reports, eval.CategoryRetrievalCheck),
 		Refusal:      eval.ScoreFor(reports, eval.CategoryRefusal),
 		ContactFlow:  eval.ScoreFor(reports, eval.CategoryContactFlow),
+		ToolFlow:     eval.ScoreFor(reports, eval.CategoryToolFlow),
 		MeanRank:     diag.MeanRank,
 		MeanCtxChars: diag.MeanCtxChars,
 		ChunkCount:   dist.count,
