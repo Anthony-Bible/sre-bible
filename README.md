@@ -170,10 +170,12 @@ getComputedStyle(document.getElementById('streaming-trace')).display // 'block' 
 
 See [`deploy/README.md`](deploy/README.md) for the full operations runbook: Terraform provisioning, GKE secrets, ArgoCD bootstrap, re-ingestion procedure, and troubleshooting.
 
-The deploy flow after initial setup is:
+The deploy flow after initial setup is fully automated — no manual digest edit:
 1. Push to `main` → GitHub Actions builds and pushes the image to GHCR.
-2. Update the image digest in `deploy/deployment.yaml`.
-3. Push → ArgoCD auto-syncs within ~3 minutes.
+2. CI renders the resolved image digest into `deploy/deployment.yaml` and force-pushes the result to the `deploy-state` branch.
+3. ArgoCD tracks `deploy-state` and auto-syncs within ~3 minutes.
+
+`main` stays protected and free of automated digest-bump commits; `deploy-state` holds the rendered, deploy-ready manifests (its history is disposable).
 
 ## Architecture decisions
 
