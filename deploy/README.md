@@ -169,7 +169,16 @@ Or equivalently: `make ingest-prod` (see Makefile for the full incantation).
 ### 7. Bootstrap ArgoCD Application
 
 This is a one-time step. After this, ArgoCD continuously reconciles
-`deploy/` from the main branch.
+`deploy/` from the `deploy-state` branch — the CD-managed release branch that
+CI force-pushes on every deploy (see "Ongoing Deploys" below), **not** `main`.
+
+`deploy-state` must exist before ArgoCD can sync. Seed it once from the current
+`main` tip (or let the first push-to-`main` CI run create it before you apply
+the Application):
+
+```bash
+git push origin main:deploy-state
+```
 
 ```bash
 kubectl apply -f deploy/argocd/application.yaml
@@ -199,20 +208,30 @@ CA cert.
 
 ---
 
-## Ongoing Deploys (Digest-Bump Flow)
+## Ongoing Deploys (Automated Release-Branch Flow)
 
-1. Push to `main` → GitHub Actions builds the image and prints the digest to
-   the job summary.
-2. Update the image digest in `deploy/deployment.yaml`:
-   ```yaml
-   image: ghcr.io/anthony-bible/sre-bible@sha256:<new-digest>
-   ```
-3. Commit and push to `main`.
-4. ArgoCD auto-syncs within ~3 minutes.
-5. Monitor the rollout:
-   ```bash
-   kubectl rollout status -n sre-bible deployment/sre-bible
-   ```
+Deploys are fully automated — there is **no manual digest edit**. On every push
+to `main`, the `render_and_deploy` job:
+
+1. Builds the image and pushes it to GHCR.
+2. Renders the resolved image digest into `deploy/deployment.yaml`.
+3. Force-pushes the result ("latest `main` + digest") to the `deploy-state`
+   branch.
+
+ArgoCD tracks `deploy-state` (not `main`) and auto-syncs within ~3 minutes.
+
+Why a separate branch: `main` is protected with required status checks
+(`test-unit`/`build`/`eval`) that CI's default `GITHUB_TOKEN` cannot satisfy, so
+pushing a digest bump there is rejected (`GH006: protected branch hook
+declined`). The unprotected `deploy-state` branch sidesteps that while keeping
+`main` protected and free of automated commits. Its history is disposable
+(force-pushed each deploy).
+
+Monitor the rollout:
+
+```bash
+kubectl rollout status -n sre-bible deployment/sre-bible
+```
 
 ---
 
