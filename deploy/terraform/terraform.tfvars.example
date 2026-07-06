@@ -3,4 +3,4 @@
 
 # project_id = "gen-lang-client-0479899208"
 # region     = "us-central1"
-# db_tier    = "db-f1-micro"
+# db_tier    = "db-g1-small"

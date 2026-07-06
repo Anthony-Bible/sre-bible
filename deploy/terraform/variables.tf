@@ -13,13 +13,13 @@ variable "region" {
 variable "db_tier" {
   description = "Cloud SQL machine tier"
   type        = string
-  default     = "db-f1-micro"
+  default     = "db-g1-small"
 }
 
 variable "db_version" {
   description = "Postgres version"
   type        = string
-  default     = "POSTGRES_17"
+  default     = "POSTGRES_18"
 }
 
 variable "k8s_namespace" {

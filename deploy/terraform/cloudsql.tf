@@ -2,7 +2,6 @@ resource "random_password" "db" {
   length  = 32
   special = false
 }
-
 resource "google_sql_database_instance" "main" {
   name             = "sre-bible"
   database_version = var.db_version
@@ -12,11 +11,6 @@ resource "google_sql_database_instance" "main" {
     tier              = var.db_tier
     availability_type = "ZONAL"
     disk_autoresize   = true
-
-    database_flags {
-      name  = "cloudsql.enable_pgvector"
-      value = "on"
-    }
 
     ip_configuration {
       ipv4_enabled = true
