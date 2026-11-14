@@ -115,6 +115,11 @@ jobs:
   build:
     runs-on: ubuntu-latest
     needs: determine_version
+    # GITHUB_TOKEN is minted per run, so GHCR auth can't expire the way the
+    # old PUSH_SECRET PAT did.
+    permissions:
+      contents: read
+      packages: write
     outputs:
       image_digest: ${{ steps.push.outputs.digest }}
     env:
@@ -126,8 +131,8 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.PUSH_SECRET }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build and push
         id: push
         uses: docker/build-push-action@v6

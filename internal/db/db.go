@@ -13,18 +13,19 @@ import (
 )
 
 // NewPool creates a pgx connection pool with pgvector types registered.
-// Pool limits are sized for db-f1-micro: 2 replicas × 5 conns + headroom for the ingest CLI.
+// Pool limits are sized for the shared db-f1-micro instance: 2 replicas × 4 conns,
+// leaving the rest of the instance's connections to password-exchange (ADR 0015).
 func NewPool(ctx context.Context, databaseURL string, log *slog.Logger) (*pgxpool.Pool, error) {
 	cfg, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse database URL: %w", err)
 	}
 
-	cfg.MaxConns = 5
+	cfg.MaxConns = 4
 	cfg.MaxConnIdleTime = 5 * time.Minute
 	cfg.MaxConnLifetime = 30 * time.Minute
 
-	// Bound every statement at the DB so a slow/stuck query can't pin one of the five
+	// Bound every statement at the DB so a slow/stuck query can't pin one of the four
 	// pooled connections indefinitely and starve the rest under a traffic spike. This is
 	// the DB-side backstop; the request-side load-shed (a short context deadline that
 	// bounds pool-acquire wait → HTTP 503) lives in internal/server. Set on ConnConfig
