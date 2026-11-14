@@ -125,7 +125,7 @@ Turnstile: checked once per session. Session marked `verified` in DB after first
 - PostgreSQL 17 + pgvector extension.
 - Migrations via Goose (`pressly/goose/v3`), embedded SQL in `internal/db/migrations/`. Run automatically at server startup.
 - **Migrations must be idempotent.** Use `IF NOT EXISTS` / `IF EXISTS` guards on all `ADD COLUMN`, `DROP COLUMN`, `CREATE TABLE`, `CREATE INDEX`, etc. so re-running a migration against a DB that already has the change is safe.
-- Connection pool: max 5 conns (sized for Cloud SQL `db-f1-micro`).
+- Connection pool: max 4 conns per process (Cloud SQL `db-f1-micro`, shared with password-exchange; ADR 0015).
 - `SourceStore` satisfies `ingest.SourceRepository`, `rag.ChunkSearcher`, `rag.DocumentLister`, `rag.FullTextFetcher` — compile-time assertions in `cmd/server/main.go`.
 - `SessionStore` satisfies `server.SessionRepository`.
 
@@ -155,4 +155,5 @@ Current instruments cover HTTP traffic (requests, duration, in-flight), sessions
 - **RAG chosen over direct context injection** — portfolio demonstration and extensibility, despite resume content fitting in Claude's 200K context window.
 - **Anthropic (generation) + Gemini (embeddings + PDF extraction)** — Claude for grounding quality, Gemini embedding-2 for cost-effective 768-dim vectors. Switching the embedding model requires re-ingesting all sources.
 - **Cloud SQL + pgvector** — managed Postgres on GCP, pgvector for cosine similarity; avoids a separate vector DB service.
+- **Shared Cloud SQL instance** — password-exchange has its own databases and users on the `sre-bible` instance; sre-bible's pool is capped at 4 per process, PITR and deletion protection are on (ADR 0015).
 - **Cloudflare Turnstile** gates `POST /chat` to prevent automated abuse. Both site key and secret key are required at startup (not optional).

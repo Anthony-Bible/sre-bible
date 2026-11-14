@@ -17,7 +17,7 @@ Deploy the application to the existing GKE cluster using raw Kubernetes YAML man
 5. **Cloud SQL Auth Proxy as native sidecar (`initContainer` + `restartPolicy: Always`)** — Kubernetes 1.35 supports the native sidecar pattern; the proxy runs with Workload Identity (no key file); the app container connects over loopback (`127.0.0.1:5432`), avoiding network exposure.
 6. **No Origin CA cert; Full (strict) SSL mode** — cert-manager issues a real Let's Encrypt cert, so Cloudflare Full (strict) mode works without an Origin CA cert. Using an Origin CA cert would require either Full (non-strict) mode or rotating the cert manually.
 7. **Migrations via single local ingest run** — `goose`'s `UpContext` takes no advisory lock; running migrations from a single local process (via `cloud-sql-proxy` port-forward) before deploying sidesteps the multi-replica race condition. Follow-up option: goose provider API + `WithSessionLocker()`.
-8. **MaxConns=5 per replica** — `db-f1-micro` allows ~25 connections; 2 replicas × 5 + local ingest headroom fits within that ceiling safely.
+8. *(Superseded by ADR 0015: now MaxConns=4, instance shared with password-exchange.)* **MaxConns=5 per replica** — `db-f1-micro` allows ~25 connections; 2 replicas × 5 + local ingest headroom fits within that ceiling safely.
 
 ## Consequences
 - Standard GitOps workflow: merge to main → image build → digest bump → ArgoCD auto-sync.
