@@ -9,6 +9,13 @@ Provisions the GCP infrastructure for sre-bible: Cloud SQL (PostgreSQL + pgvecto
 | `cloudsql.tf` | `random_password.db`, `google_sql_database_instance.main`, `google_sql_database.main`, `google_sql_user.app` |
 | `iam.tf` | `google_service_account.proxy`, `google_project_iam_member.cloudsql_client`, `google_service_account_iam_member.workload_identity` |
 
+## Shared instance
+
+The `sre-bible` instance also hosts password-exchange's databases and users (ADR 0015). That project's Terraform reads this instance through a data source and never changes its settings; instance settings live here. Before applying:
+
+- A change that restarts the instance (tier, version, flags, enabling PITR) takes password-exchange down too. Apply in a quiet window.
+- PITR keeps 7 days of transaction logs. To recover one app, make a PITR clone and copy that app's databases back. Never restore over this instance.
+
 ## Usage
 
 ```hcl
