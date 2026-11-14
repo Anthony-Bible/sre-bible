@@ -25,7 +25,7 @@ terraform apply
 |------|-------------|------|---------|----------|
 | `project_id` | GCP project ID | `string` | — | yes |
 | `region` | GCP region for all resources | `string` | `"us-central1"` | no |
-| `db_tier` | Cloud SQL machine tier | `string` | `"db-g1-small"` | no |
+| `db_tier` | Cloud SQL machine tier | `string` | `"db-f1-micro"` | no |
 | `db_version` | Cloud SQL PostgreSQL engine version | `string` | `"POSTGRES_18"` | no |
 | `k8s_namespace` | Kubernetes namespace for the workload | `string` | `"sre-bible"` | no |
 | `k8s_service_account` | Kubernetes service account name | `string` | `"sre-bible"` | no |
