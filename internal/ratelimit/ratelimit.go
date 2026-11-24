@@ -26,11 +26,12 @@ import (
 // ceiling. The zero value is not usable; construct one with New. All methods are
 // safe for concurrent use.
 type Limiter struct {
-	mu        sync.Mutex
-	keys      map[string]*keyEntry // per-key token buckets, created lazily
-	perKey    time.Duration        // min interval between allowed calls per key; also the idle-eviction TTL
-	global    *rate.Limiter        // process-wide ceiling (a backstop)
-	lastSweep time.Time            // throttles the idle sweep to once per perKey
+	mu          sync.Mutex
+	keys        map[string]*keyEntry // per-key token buckets, created lazily
+	perKey      time.Duration        // min interval between allowed calls per key; also the idle-eviction TTL
+	perKeyBurst int                  // tokens a single key may spend in a burst (>=1)
+	global      *rate.Limiter        // process-wide ceiling (a backstop)
+	lastSweep   time.Time            // throttles the idle sweep to once per perKey
 }
 
 // keyEntry is one key's bucket plus the bookkeeping the idle sweep needs.
@@ -45,6 +46,24 @@ type keyEntry struct {
 // A non-positive perKey disables the per-key interval (every call passes the
 // per-key check); a non-positive globalPerHour disables the global ceiling.
 func New(perKey time.Duration, globalPerHour int) *Limiter {
+	return NewWithBurst(perKey, 1, globalPerHour)
+}
+
+// NewWithBurst is New with a configurable per-key burst: a single key may spend
+// up to perKeyBurst tokens back-to-back, after which it refills one token every
+// perKey interval. Burst 1 reproduces New's strict one-per-interval behaviour.
+//
+// This expresses a per-key hourly budget with headroom for bursts: for an
+// N-per-hour cap that still lets a shared source (e.g. a NAT'd /64 of real
+// users) fire several requests at once, use perKey = time.Hour/N with a
+// generous perKeyBurst. A perKeyBurst < 1 is floored to 1.
+//
+// A non-positive perKey disables the per-key interval (every call passes the
+// per-key check); a non-positive globalPerHour disables the global ceiling.
+func NewWithBurst(perKey time.Duration, perKeyBurst int, globalPerHour int) *Limiter {
+	if perKeyBurst < 1 {
+		perKeyBurst = 1
+	}
 	global := rate.NewLimiter(rate.Inf, 0)
 	if globalPerHour > 0 {
 		// Steady globalPerHour/hour with a burst of globalPerHour: a backstop
@@ -52,9 +71,10 @@ func New(perKey time.Duration, globalPerHour int) *Limiter {
 		global = rate.NewLimiter(rate.Every(time.Hour/time.Duration(globalPerHour)), globalPerHour)
 	}
 	return &Limiter{
-		keys:   make(map[string]*keyEntry),
-		perKey: perKey,
-		global: global,
+		keys:        make(map[string]*keyEntry),
+		perKey:      perKey,
+		perKeyBurst: perKeyBurst,
+		global:      global,
 	}
 }
 
@@ -72,9 +92,10 @@ func (l *Limiter) Allow(key string) bool {
 
 	e := l.keys[key]
 	if e == nil {
-		// rate.Every(perKey) with burst 1 ⇒ true at most once per perKey. A
-		// non-positive perKey yields rate.Inf, i.e. always allowed.
-		e = &keyEntry{lim: rate.NewLimiter(rate.Every(l.perKey), 1)}
+		// rate.Every(perKey) refills one token per perKey; burst perKeyBurst lets a
+		// key spend that many back-to-back. A non-positive perKey yields rate.Inf,
+		// i.e. always allowed.
+		e = &keyEntry{lim: rate.NewLimiter(rate.Every(l.perKey), l.perKeyBurst)}
 		l.keys[key] = e
 	}
 	e.lastSeen = now
@@ -100,25 +121,36 @@ func (l *Limiter) Allow(key string) bool {
 	return true
 }
 
-// sweep evicts keys idle longer than perKey. Once that cooldown elapses a bucket
-// is full again — identical to a fresh one — so dropping it is safe. It is an
-// O(n) scan over the live keys, but n is bounded to keys seen within the last
-// perKey window and the scan is amortized to at most once per perKey, so the cost
-// is negligible at this scale. The worst case is a very large key space (e.g.
-// keying by IP under a flood), where holding the mutex for the scan becomes the
-// bottleneck; the escape hatch then is to shard the map or replace it with a
+// sweep evicts keys idle longer than the idle TTL. The TTL is perKey*perKeyBurst
+// — the time an empty bucket takes to refill all perKeyBurst tokens — so an
+// evicted-then-recreated key gets a full-but-not-larger budget: dropping it can
+// never hand a key more tokens than keeping it would have. (A shorter TTL, e.g.
+// perKey, would let a key spend its whole burst, idle just past perKey while only
+// one token refills, get evicted, and return with a fresh full burst — defeating
+// the hourly cap. lastSeen is bumped on every call, allowed or denied, so a
+// hammering key never goes idle and is never evicted.)
+//
+// It is an O(n) scan over the live keys, but n is bounded to keys seen within the
+// last idle-TTL window and the scan is amortized to at most once per idle TTL, so
+// the cost is negligible at this scale. The worst case is a very large key space
+// (e.g. keying by IP under a flood), where holding the mutex for the scan becomes
+// the bottleneck; the escape hatch then is to shard the map or replace it with a
 // time-ordered min-heap so eviction touches only the expired entries (O(k))
-// rather than all of them. That is over-engineering for throttling by session ID,
-// so we keep the flat scan.
+// rather than all of them. That is over-engineering at this scale, so we keep the
+// flat scan.
 //
 // Caller must hold l.mu.
 func (l *Limiter) sweep(now time.Time) {
-	if l.perKey <= 0 || now.Sub(l.lastSweep) < l.perKey {
+	if l.perKey <= 0 {
+		return
+	}
+	idleTTL := l.perKey * time.Duration(l.perKeyBurst)
+	if now.Sub(l.lastSweep) < idleTTL {
 		return
 	}
 	l.lastSweep = now
 	for k, e := range l.keys {
-		if now.Sub(e.lastSeen) > l.perKey {
+		if now.Sub(e.lastSeen) > idleTTL {
 			delete(l.keys, k)
 		}
 	}

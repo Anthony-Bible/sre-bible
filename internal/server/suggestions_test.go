@@ -290,6 +290,54 @@ func TestHandleSuggestions_Throttled(t *testing.T) {
 	}
 }
 
+// TestHandleSuggestions_IPThrottled verifies the per-IP dimension on /suggestions:
+// with only a per-IP limiter wired in (session limiter nil), two requests from the
+// same Cf-Connecting-Ip are throttled even with different session IDs, while a
+// different IP is independent — the backstop against session-ID rotation.
+func TestHandleSuggestions_IPThrottled(t *testing.T) {
+	t.Parallel()
+
+	sessions := &stubSessions{isVerified: true, messages: oneTurn()}
+	pipeline := &stubSuggestPipeline{questions: []string{"first call only"}}
+	srv := newTestServerWithTurnstile(t, pipeline, sessions, &stubTurnstile{})
+	// Per-IP only (burst 1 + long interval); leave the per-session limiter nil.
+	srv.suggestIPLimiter = ratelimit.NewWithBurst(time.Hour, 1, 0)
+
+	suggestReq := func(sid, ip string) *http.Request {
+		req := httptest.NewRequest(http.MethodPost, "/suggestions", nil)
+		req.Header.Set(sessionHeader, sid)
+		req.Header.Set("Cf-Connecting-Ip", ip)
+		return req
+	}
+
+	const ip = "203.0.113.9"
+	sid1 := "aabbccdd-0000-4000-8000-000000000041"
+	sid2 := "aabbccdd-0000-4000-8000-000000000042"
+	sidOther := "aabbccdd-0000-4000-8000-000000000043"
+
+	rr1 := httptest.NewRecorder()
+	srv.ServeHTTP(rr1, suggestReq(sid1, ip))
+	if rr1.Code != http.StatusOK {
+		t.Fatalf("first request status = %d, want %d", rr1.Code, http.StatusOK)
+	}
+
+	rr2 := httptest.NewRecorder()
+	srv.ServeHTTP(rr2, suggestReq(sid2, ip))
+	if rr2.Code != http.StatusTooManyRequests {
+		t.Fatalf("second request (same IP, rotated session) status = %d, want %d", rr2.Code, http.StatusTooManyRequests)
+	}
+
+	rr3 := httptest.NewRecorder()
+	srv.ServeHTTP(rr3, suggestReq(sidOther, "198.51.100.4"))
+	if rr3.Code != http.StatusOK {
+		t.Fatalf("request from a different IP status = %d, want %d", rr3.Code, http.StatusOK)
+	}
+
+	if pipeline.suggestCalls != 2 {
+		t.Errorf("SuggestFollowUps called %d time(s), want 2 (the IP-throttled request must not reach the suggester)", pipeline.suggestCalls)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // TestHandleSuggestions_LoadShed
 // ---------------------------------------------------------------------------

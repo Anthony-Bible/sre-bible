@@ -101,6 +101,8 @@ type Server struct {
 	interviewEnabled bool
 	suggestLimiter   *ratelimit.Limiter
 	chatLimiter      *ratelimit.Limiter
+	suggestIPLimiter *ratelimit.Limiter
+	chatIPLimiter    *ratelimit.Limiter
 	quickDBTimeout   time.Duration
 	templates        *template.Template
 	log              *slog.Logger
@@ -123,13 +125,15 @@ func defaultSuggestedQuestions() []string {
 // NewServer creates a Server, parses embedded templates, and registers routes.
 // turnstile may be nil only in tests; in production main.go always provides one.
 // suggestLimiter throttles POST /suggestions and chatLimiter throttles POST
-// /chat; the two endpoints have independent budgets. A nil limiter disables
-// throttling for that endpoint (tests, local dev). interviewEnabled gates
-// Interview Mode: when false the backend never activates it and the frontend
-// hides the /interview command and HUD. quickDBTimeout bounds the per-request
-// quick-DB phase so a saturated pool sheds 503; a non-positive value falls back
-// to defaultQuickDBTimeout.
-func NewServer(pipeline Answerer, sessions SessionRepository, pinger Pinger, turnstile TurnstileVerifier, turnstileSiteKey string, suggestLimiter *ratelimit.Limiter, chatLimiter *ratelimit.Limiter, interviewEnabled bool, quickDBTimeout time.Duration, log *slog.Logger) (*Server, error) {
+// /chat; the two endpoints have independent budgets. suggestIPLimiter and
+// chatIPLimiter add an independent per-client-IP dimension to each endpoint (the
+// abuse backstop against session-ID rotation, keyed by clientIPKey). A nil
+// limiter disables that dimension for that endpoint (tests, local dev).
+// interviewEnabled gates Interview Mode: when false the backend never activates
+// it and the frontend hides the /interview command and HUD. quickDBTimeout
+// bounds the per-request quick-DB phase so a saturated pool sheds 503; a
+// non-positive value falls back to defaultQuickDBTimeout.
+func NewServer(pipeline Answerer, sessions SessionRepository, pinger Pinger, turnstile TurnstileVerifier, turnstileSiteKey string, suggestLimiter *ratelimit.Limiter, chatLimiter *ratelimit.Limiter, suggestIPLimiter *ratelimit.Limiter, chatIPLimiter *ratelimit.Limiter, interviewEnabled bool, quickDBTimeout time.Duration, log *slog.Logger) (*Server, error) {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -152,6 +156,8 @@ func NewServer(pipeline Answerer, sessions SessionRepository, pinger Pinger, tur
 		interviewEnabled: interviewEnabled,
 		suggestLimiter:   suggestLimiter,
 		chatLimiter:      chatLimiter,
+		suggestIPLimiter: suggestIPLimiter,
+		chatIPLimiter:    chatIPLimiter,
 		quickDBTimeout:   quickDBTimeout,
 		templates:        t,
 		log:              log,

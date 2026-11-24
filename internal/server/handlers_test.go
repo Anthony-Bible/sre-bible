@@ -194,7 +194,7 @@ func (p *stubPipeline) Answer(ctx context.Context, _ string, _ []rag.Message, _ 
 // disabled kill-switch is covered separately by newTestServerInterviewDisabled.
 func newTestServer(t *testing.T, pipeline Answerer, sessions SessionRepository) *Server {
 	t.Helper()
-	srv, err := NewServer(pipeline, sessions, nil, nil, "", nil, nil, true, 0, nil)
+	srv, err := NewServer(pipeline, sessions, nil, nil, "", nil, nil, nil, nil, true, 0, nil)
 	if err != nil {
 		t.Fatalf("NewServer returned unexpected error: %v", err)
 	}
@@ -205,7 +205,7 @@ func newTestServer(t *testing.T, pipeline Answerer, sessions SessionRepository) 
 // to verify the backend kill-switch.
 func newTestServerInterviewDisabled(t *testing.T, pipeline Answerer, sessions SessionRepository) *Server {
 	t.Helper()
-	srv, err := NewServer(pipeline, sessions, nil, nil, "", nil, nil, false, 0, nil)
+	srv, err := NewServer(pipeline, sessions, nil, nil, "", nil, nil, nil, nil, false, 0, nil)
 	if err != nil {
 		t.Fatalf("NewServer returned unexpected error: %v", err)
 	}
@@ -215,7 +215,7 @@ func newTestServerInterviewDisabled(t *testing.T, pipeline Answerer, sessions Se
 // newTestServerWithTurnstile builds a *Server under test with the given Turnstile verifier.
 func newTestServerWithTurnstile(t *testing.T, pipeline Answerer, sessions SessionRepository, ts TurnstileVerifier) *Server {
 	t.Helper()
-	srv, err := NewServer(pipeline, sessions, nil, ts, "test-site-key", nil, nil, true, 0, nil)
+	srv, err := NewServer(pipeline, sessions, nil, ts, "test-site-key", nil, nil, nil, nil, true, 0, nil)
 	if err != nil {
 		t.Fatalf("NewServer returned unexpected error: %v", err)
 	}
@@ -979,6 +979,61 @@ func TestHandleChat_Throttled(t *testing.T) {
 
 	if pipeline.answerCalls != 1 {
 		t.Errorf("Answer called %d time(s), want 1 (throttled request must not reach the pipeline)", pipeline.answerCalls)
+	}
+}
+
+// TestHandleChat_IPThrottled verifies the per-IP dimension: with only a per-IP
+// limiter wired in (session limiter nil), two POST /chat requests from the same
+// Cf-Connecting-Ip are throttled even when each carries a *different* session ID —
+// proving the backstop defeats session-ID rotation — while a request from a
+// different IP is independent.
+func TestHandleChat_IPThrottled(t *testing.T) {
+	t.Parallel()
+
+	sessions := &stubSessions{isVerified: true}
+	pipeline := &stubPipeline{tokens: []string{"answer"}, citations: []string{"src.pdf"}}
+	srv := newTestServerWithTurnstile(t, pipeline, sessions, &stubTurnstile{})
+	// Per-IP only (burst 1 + long interval → the second call per IP is throttled);
+	// leave the per-session limiter nil so the session dimension can't mask the result.
+	srv.chatIPLimiter = ratelimit.NewWithBurst(time.Hour, 1, 0)
+
+	chatReq := func(sid, ip string) *http.Request {
+		form := url.Values{}
+		form.Set("question", "what is SRE?")
+		req := httptest.NewRequest(http.MethodPost, "/chat", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set(sessionHeader, sid)
+		req.Header.Set("Cf-Connecting-Ip", ip)
+		return req
+	}
+
+	const ip = "203.0.113.9"
+	// Two distinct, valid session IDs — a rotating attacker — behind one IP.
+	sid1 := "aabbccdd-0000-4000-8000-000000000031"
+	sid2 := "aabbccdd-0000-4000-8000-000000000032"
+	sidOther := "aabbccdd-0000-4000-8000-000000000033"
+
+	tf1 := newTestFlusher()
+	srv.ServeHTTP(tf1, chatReq(sid1, ip))
+	if tf1.Code != http.StatusOK {
+		t.Fatalf("first request status = %d, want %d", tf1.Code, http.StatusOK)
+	}
+
+	tf2 := newTestFlusher()
+	srv.ServeHTTP(tf2, chatReq(sid2, ip))
+	if tf2.Code != http.StatusTooManyRequests {
+		t.Fatalf("second request (same IP, rotated session) status = %d, want %d", tf2.Code, http.StatusTooManyRequests)
+	}
+
+	// A different IP has its own bucket, so it is served.
+	tf3 := newTestFlusher()
+	srv.ServeHTTP(tf3, chatReq(sidOther, "198.51.100.4"))
+	if tf3.Code != http.StatusOK {
+		t.Fatalf("request from a different IP status = %d, want %d", tf3.Code, http.StatusOK)
+	}
+
+	if pipeline.answerCalls != 2 {
+		t.Errorf("Answer called %d time(s), want 2 (the IP-throttled request must not reach the pipeline)", pipeline.answerCalls)
 	}
 }
 

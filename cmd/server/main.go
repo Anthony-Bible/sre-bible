@@ -262,6 +262,8 @@ func run(log *slog.Logger) error {
 
 	suggestLimiter := setupSuggestLimiter(ctx, log)
 	chatLimiter := setupChatLimiter(ctx, log)
+	suggestIPLimiter := setupIPLimiter(ctx, log, "FOLLOWUP_RATE_LIMIT_PER_IP_PER_HOUR", 240, "suggestions")
+	chatIPLimiter := setupIPLimiter(ctx, log, "CHAT_RATE_LIMIT_PER_IP_PER_HOUR", 120, "chat")
 
 	// Interview Mode is off unless explicitly enabled (opt-in kill-switch). When
 	// disabled, the backend refuses to activate it and the frontend hides the command.
@@ -272,7 +274,7 @@ func run(log *slog.Logger) error {
 	// statement_timeout so the context fires first. Invalid/non-positive → default + warn.
 	quickDBTimeout := time.Duration(envPositiveInt(ctx, "DB_QUICK_TIMEOUT_MS", server.DefaultQuickDBTimeoutMS, log)) * time.Millisecond
 
-	srv, err := server.NewServer(pipeline, sessionRepo, pool, tsVerifier, turnstileSiteKey, suggestLimiter, chatLimiter, cfg.interviewEnabled, quickDBTimeout, log)
+	srv, err := server.NewServer(pipeline, sessionRepo, pool, tsVerifier, turnstileSiteKey, suggestLimiter, chatLimiter, suggestIPLimiter, chatIPLimiter, cfg.interviewEnabled, quickDBTimeout, log)
 	if err != nil {
 		return fmt.Errorf("create server: %w", err)
 	}
@@ -493,6 +495,32 @@ func setupChatLimiter(ctx context.Context, log *slog.Logger) *ratelimit.Limiter 
 		slog.Duration("min_interval", interval),
 	)
 	return ratelimit.New(interval, globalLimit)
+}
+
+// perIPBurst is the per-IP token-bucket burst for both endpoints' per-IP
+// limiters. It lets a shared source — a corporate NAT or a user's whole IPv6
+// /64 — fire this many requests back-to-back before the steady per-hour refill
+// paces them, so the backstop absorbs a legitimately busy shared egress (the
+// recruiter audience plausibly shares a company NAT) rather than throttling the
+// first few of them. The hourly cap still bounds sustained abuse from one host.
+const perIPBurst = 20
+
+// setupIPLimiter builds a per-client-IP limiter: the abuse backstop that targets
+// the actual host behind session-ID rotation (keyed by clientIPKey — /64 for
+// IPv6). perHour (from envVar, reusing envPositiveInt) is expressed as a token
+// bucket refilling perHour tokens/hour with a perIPBurst burst; the limiter's
+// process-global dimension is disabled here because the per-session limiters
+// already own that cap. Invalid/non-positive env values fall back to defPerHour
+// and warn. Trustworthy only because the origin is Cloudflare-locked (ADR 0016).
+func setupIPLimiter(ctx context.Context, log *slog.Logger, envVar string, defPerHour int, label string) *ratelimit.Limiter {
+	perHour := envPositiveInt(ctx, envVar, defPerHour, log)
+	interval := time.Hour / time.Duration(perHour)
+	log.InfoContext(ctx, "per-IP rate limit enabled",
+		slog.String("endpoint", label),
+		slog.Int("per_ip_per_hour", perHour),
+		slog.Int("burst", perIPBurst),
+	)
+	return ratelimit.NewWithBurst(interval, perIPBurst, 0)
 }
 
 // envString reads key as a trimmed string, returning def when unset or blank.

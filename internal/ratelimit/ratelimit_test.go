@@ -101,6 +101,68 @@ func TestLimiter_GlobalRejectionDoesNotBurnPerKeyBudget(t *testing.T) {
 	})
 }
 
+// TestLimiter_PerKeyBurst verifies NewWithBurst lets a single key spend
+// perKeyBurst tokens back-to-back, throttles the next, and then refills exactly
+// one token per perKey interval (not a fresh full burst): a core property for
+// using the limiter as an N-per-hour cap with headroom for a shared source.
+func TestLimiter_PerKeyBurst(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		const burst = 3
+		// Global disabled so only the per-key dimension is under test.
+		l := NewWithBurst(time.Second, burst, 0)
+
+		for i := range burst {
+			if !l.Allow("k") {
+				t.Fatalf("burst call %d of %d must be allowed", i+1, burst)
+			}
+		}
+		if l.Allow("k") {
+			t.Fatal("call exceeding the burst must be throttled")
+		}
+
+		// After two intervals exactly two tokens have refilled — not the full
+		// burst. So two calls pass and the third is throttled.
+		time.Sleep(2 * time.Second)
+		if !l.Allow("k") || !l.Allow("k") {
+			t.Fatal("two tokens must have refilled after two intervals")
+		}
+		if l.Allow("k") {
+			t.Fatal("only two tokens refill in two intervals; the third call must be throttled")
+		}
+	})
+}
+
+// TestLimiter_BurstIdleEviction verifies that idle eviction still bounds the keys
+// map when perKeyBurst > 1: keys untouched past the idle TTL (perKey*perKeyBurst)
+// are swept. The TTL is the full refill window, so an evicted key could only ever
+// be recreated with a bucket it would already have had — eviction never grants a
+// key extra budget.
+func TestLimiter_BurstIdleEviction(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		const burst = 3
+		l := NewWithBurst(time.Second, burst, 100000)
+
+		for i := range 50 {
+			l.Allow(fmt.Sprintf("burst-%d", i))
+		}
+
+		// idle TTL is perKey*burst = 3s; advance past it, then make one more call
+		// to trigger the amortized sweep.
+		time.Sleep(4 * time.Second)
+		l.Allow("trigger")
+
+		l.mu.Lock()
+		n := len(l.keys)
+		l.mu.Unlock()
+
+		if n != 1 {
+			t.Fatalf("keys map size = %d, want 1 after idle eviction", n)
+		}
+	})
+}
+
 // TestLimiter_IdleEviction verifies the keys map does not grow without bound:
 // keys untouched past perKey are swept, so a burst of one-shot keys does not
 // leak entries.

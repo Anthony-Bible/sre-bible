@@ -334,6 +334,19 @@ func (s *Server) handleSuggestions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Per-IP rate limit (abuse backstop): checked before the per-session dimension so
+	// a per-IP rejection doesn't burn a session token. Keyed by the CF-supplied client
+	// IP (/64 for IPv6); an unparseable IP yields "" and falls open to the per-session
+	// check below. The IP is used only as the limiter key — never logged, never a
+	// metric label. This targets the actual host behind session-ID rotation.
+	if s.suggestIPLimiter != nil {
+		if ipKey := clientIPKey(r); ipKey != "" && !s.suggestIPLimiter.Allow(ipKey) {
+			metrics.M.FollowUpSuggestions.Add(ctx, 1, metric.WithAttributes(metrics.AttrString("status", "throttled_ip")))
+			http.Error(w, "rate limited", http.StatusTooManyRequests)
+			return
+		}
+	}
+
 	// Rate limit: only verified sessions reach here, so unverified abuse is already
 	// rejected (above) without consuming throttle budget. A throttled request makes
 	// no DB read / Model Armor / LLM call — it short-circuits with 429, which the
@@ -394,11 +407,7 @@ func (s *Server) verifyTurnstile(ctx context.Context, w http.ResponseWriter, r *
 		http.Error(w, "verification required", http.StatusForbidden)
 		return false
 	}
-	remoteIP := r.Header.Get("Cf-Connecting-Ip")
-	if remoteIP == "" {
-		remoteIP = r.RemoteAddr
-	}
-	tokenOK, verifyErr := s.turnstile.Verify(ctx, token, remoteIP)
+	tokenOK, verifyErr := s.turnstile.Verify(ctx, token, clientIP(r))
 	outcome := "pass"
 	switch {
 	case verifyErr != nil:
@@ -482,6 +491,19 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// Turnstile gate — writes its own error response and returns false on rejection.
 	if !s.verifyTurnstile(ctx, w, r, sid, state.Verified) {
 		return
+	}
+
+	// Per-IP rate limit (abuse backstop): checked before the per-session dimension so
+	// a per-IP rejection doesn't burn a session token. Keyed by the CF-supplied client
+	// IP (/64 for IPv6); an unparseable IP yields "" and falls open to the per-session
+	// check below. The IP is used only as the limiter key — never logged, never a
+	// metric label. This targets the actual host behind session-ID rotation.
+	if s.chatIPLimiter != nil {
+		if ipKey := clientIPKey(r); ipKey != "" && !s.chatIPLimiter.Allow(ipKey) {
+			metrics.M.LLMResponsesBlocked.Add(ctx, 1, metric.WithAttributes(metrics.AttrString("reason", "rate_limited_ip")))
+			http.Error(w, "rate limited", http.StatusTooManyRequests)
+			return
+		}
 	}
 
 	// Rate limit: only verified sessions reach here. A throttled request makes no

@@ -48,7 +48,7 @@ type Metrics struct {
 
 	// LLM / RAG outcomes.
 	LLMResponsesServed  metric.Int64Counter     // successful streamed answers
-	LLMResponsesBlocked metric.Int64Counter     // attr: reason ("model_armor", "turnstile", "rate_limited")
+	LLMResponsesBlocked metric.Int64Counter     // attr: reason ("model_armor", "turnstile", "rate_limited", "rate_limited_ip")
 	LLMErrors           metric.Int64Counter     // attr: stage ("embed","search","stream")
 	LLMDuration         metric.Float64Histogram // wall-clock, attr: outcome
 
@@ -56,7 +56,7 @@ type Metrics struct {
 	LLMToolCalls metric.Int64Counter // attrs: tool, outcome
 
 	// Follow-up suggestion cards (inactivity-triggered).
-	FollowUpSuggestions metric.Int64Counter // attr: status ("ok","empty","blocked","unverified","throttled","error")
+	FollowUpSuggestions metric.Int64Counter // attr: status ("ok","empty","blocked","unverified","throttled","throttled_ip","error")
 
 	// Session-state cache (galaxycache tier). Synchronous lookups counter; the
 	// galaxycache-internal totals are bridged separately via the observable
@@ -244,7 +244,7 @@ func newMetrics(meter metric.Meter) (*Metrics, error) {
 
 	if m.FollowUpSuggestions, err = meter.Int64Counter(
 		"sre_bible_followup_suggestions",
-		metric.WithDescription("Follow-up suggestion-card generations, labelled by status (ok/empty/blocked/unverified/throttled/error)."),
+		metric.WithDescription("Follow-up suggestion-card generations, labelled by status (ok/empty/blocked/unverified/throttled/throttled_ip/error)."),
 	); err != nil {
 		return nil, err
 	}
